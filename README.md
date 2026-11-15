@@ -98,6 +98,9 @@
 
 ## 八、其他
 
+- 欢迎贡献代码：先阅读 [贡献指南](CONTRIBUTING.md)；使用 AI 辅助开发时同时阅读 [AI 协作说明](AGENTS.md)。通过 Fork 和 PR 提交，由维护者审核合并。
+- 任务认领、审核与主分支管理建议见 [维护者协作指南](docs/维护者协作指南.md)。
+
 - 本项目以 GPL-3.0 许可开源，见 [LICENSE](LICENSE)。
 
 - 单字解释的词表以 NVDA 简体中文志愿者团队的字符描述（GPL-2.0 或更高）为主，jieba 分词的词频表（MIT）补充，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
