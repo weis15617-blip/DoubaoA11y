@@ -42,16 +42,34 @@ object VirtualKeys {
 
     private fun state(v: View) = states.getOrPut(v) { State() }
 
-    val enabled: Boolean get() = (A11yState.active || A11yState.directTouch) && Config.b("virtualKeys")
+    /**
+     * 全屏输入时，触摸浏览是不是已经不在中间挡着了（被模块关掉、或者本来就没开）。
+     * 全屏模式下键盘区一律由模块自己摸键读键，不看这个值，只有“是不是该让路给读屏面板”才用它。
+     */
+    private val fullscreenExplore: Boolean get() = Config.fullscreen && FullscreenMode.active && A11yState.recording
 
-    /** 讯飞式的“摸、抬手”处理：触摸浏览开着时由设置决定，关着（直接触摸）时总是 */
-    private val explorer: Boolean get() = A11yState.directTouch || keepFocus
+    /**
+     * 模块要不要接管键盘。
+     *
+     * 1.2.1 起多了一项：全屏输入生效时，即使读屏被模块关掉触摸浏览、甚至读屏整个关着，
+     * 也要接管——全屏是模块自建的触摸浏览层（见 FullscreenTouch），不再依赖读屏的状态。
+     */
+    val enabled: Boolean get() =
+        (A11yState.active || A11yState.directTouch || fullscreenExplore) && Config.b("virtualKeys")
+
+    /** 讯飞式的“摸、抬手”处理：触摸浏览开着时由设置决定，关着（直接触摸）时总是；全屏时总是 */
+    private val explorer: Boolean get() = A11yState.directTouch || keepFocus || fullscreenExplore
 
     /**
      * 手指触摸直接到键盘：触摸浏览关着，或者天坦读屏已设了触摸穿透。
      * 天坦穿透没生效时收到的仍是悬停，照旧按触摸浏览处理，不会摸不到键。
+     *
+     * 保益/点明这类读屏被模块用广播/服务整块关掉触摸浏览后，系统 isTouchExplorationEnabled
+     * 不一定立刻变 false，所以这里也认 pausedByModule（模块主动暂停过），
+     * 让键盘区域走“摸键读键抬手输入”，保益/点明关了触摸浏览后下半屏照样能朗读、能打字。
      */
-    val touchMode: Boolean get() = A11yState.directTouch || (A11yState.active && TatansBridge.requested)
+    val touchMode: Boolean get() =
+        A11yState.directTouch || (A11yState.active && TatansBridge.requested)
 
     /** 模块自己送的触摸，不能再被当成手指拦下来 */
     @Volatile
@@ -325,8 +343,7 @@ object VirtualKeys {
                     cancelHold()
                     if (old != HOST && !lift) sendKeyEvent(v, old, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
                     if (id != HOST) {
-                        Haptic.tick()
-                        speakKey(v, s, id)
+                        Haptic.tick()                        speakKey(v, s, id)
                         if (!focusHost) scheduleHold(v, s.keys[id])
                     }
                 }
@@ -451,8 +468,7 @@ object VirtualKeys {
                 current = t
                 lastAnnounce = SystemClock.uptimeMillis()
                 if (EditPanel.isOpen) L.i("编辑面板打开时摸到「${t.name}」${if (t.key != null) "（键盘键）" else t.view?.javaClass?.simpleName ?: ""}")
-                Haptic.tick()
-                Speaker.speak(t.name)
+                Haptic.tick()                Speaker.speak(t.name)
                 if (t.key != null && t.kb != null) scheduleHold(t.kb, t.key)
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
@@ -791,6 +807,8 @@ object VirtualKeys {
         return when {
             n == "删除" -> Config.i("deleteHoldMs").toLong().coerceIn(500, 5000)
             n == "空格" -> Config.i("spaceHoldMs").toLong().coerceIn(500, 5000)
+            // 回车键：开了“回车键发送消息”之后，豆包的长按换行靠原生层的长按判定，
+            // 用户按住的时间要够长才触发。这里跟空格、删除一样给一个可调的停留时间
             else -> null
         }
     }
@@ -885,6 +903,10 @@ object VirtualKeys {
         }
         L.i("${if (action == MotionEvent.ACTION_UP) "松开" else "取消"}「${k.speakable()}」，按住 ${SystemClock.uptimeMillis() - holdDownTime} 毫秒${if (holdIsVoice) "，区域=$voiceZone" else ""}")
         val cancelVoice = holdIsVoice && action == MotionEvent.ACTION_UP && voiceZone == "松手撤回输入"
+        // 按住删除连续删完松手：多选里这一串删除已经把选中的文本删掉了，退出选择态
+        if (!holdIsVoice && k.mainName() == "删除" && action == MotionEvent.ACTION_UP) {
+            EditActions.onKeyDelete()
+        }
         inject(v, holdDownTime, action, x, y)
         holdIsVoice = false
         if (cancelVoice) try {
@@ -940,8 +962,25 @@ object VirtualKeys {
     // ---------------- 合成触摸 ----------------
 
     private fun tap(v: View, k: Key) {
+        val name = k.mainName()
+        // 全屏：键盘区一打字，上半屏的编辑选项轮盘就回到“双击跳转行首行尾”那一项；
+        // 删除键顺带看看多选是不是该退出了（选中的文本被删掉，编辑框里就没有选区了）
+        if (fullscreenExplore) {
+            if (name == "删除") EditActions.onKeyDelete() else EditOptions.keyTyped()
+        }
         // 打拼音时逗号、句号切换候选，空格上屏选中的候选
-        if (Candidates.onKey(k)) return
+        if (Candidates.onKey(k)) {            return
+        }
+        // 删除键：候选栏要变了，旧的候选状态先作废，免得左右滑还能读到删掉的候选
+        if (name == "删除") {
+            Candidates.onDelete()            press(v, k, 40)
+            return
+        }
+        // 打字：候选栏里接下来弹的候选归“打字”，全屏上半屏的左右滑才去动候选栏。
+        // 移动光标之后弹的联想候选不算（见 Candidates.fromTyping），免得编辑文字时左右滑被吃掉。
+        Candidates.markTyping()
+        // 按键音在手指摸到这个键的时候已经响过了（key_pressed，和参考实现一致），
+        // 抬手输入时不再补一声，不然一次按键响两下
         press(v, k, 40)
     }
 
@@ -995,6 +1034,24 @@ object VirtualKeys {
      */
     fun onRootTouch(root: View, ev: MotionEvent): Boolean {
         if (!enabled || !touchMode || injecting) return false
+        return handleRawTouch(root, ev)
+    }
+
+    /**
+     * 全屏输入：键盘区的触摸由模块自己接管，不看读屏的触摸浏览是开是关。
+     *
+     * 这是 1.2.1 全屏重做的核心——全屏模式下模块自己就是一层触摸浏览，
+     * 读屏被暂停、被关掉、甚至根本没装读屏，键盘区照样“摸到读键、抬手输入”。
+     * 细节（停留删除、长按空格语音、手写区/豆包面板让路）和半屏那条路完全一致，走同一份代码。
+     */
+    fun onFullscreenTouch(root: View, ev: MotionEvent): Boolean {
+        if (injecting) return false
+        if (!Config.b("virtualKeys")) return false
+        if (!A11yState.recording) return false
+        return handleRawTouch(root, ev)
+    }
+
+    private fun handleRawTouch(root: View, ev: MotionEvent): Boolean {
         if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
             passThrough = false
             nativeVoiceKb = null
@@ -1032,6 +1089,8 @@ object VirtualKeys {
                     nativeVoiceKb = t?.kb
                     voiceZone = ""
                 }
+                // 删除交给豆包原生处理时，多选也该跟着退出：等原生删完再核对选区
+                if (n == "删除") EditActions.onKeyDelete()
                 Speaker.speak(n)
                 L.i("直接触摸：$n 交给豆包原来的处理")
                 return false
@@ -1097,6 +1156,97 @@ object VirtualKeys {
             return false
         }
         return walk(root)
+    }
+
+    // ---------------- 全屏手势用：按名字点键、按住空格说话 ----------------
+
+    /** 找到读法（或主名字）是 name 的键，连同它所在的键盘视图 */
+    private fun findKey(name: String): Pair<View, Key>? {
+        val root = try {
+            ViewA11yHooks.service?.window?.window?.decorView
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+        val c = KeyboardViewHooks.kbClass ?: return null
+        var found: Pair<View, Key>? = null
+        fun walk(v: View) {
+            if (found != null || v.visibility != View.VISIBLE) return
+            if (c.isInstance(v)) {
+                if (!v.isShown) return
+                val t = KeyboardViewHooks.tableOf(v) ?: return
+                val k = t.keys().firstOrNull { it.speakable() == name || it.mainName() == name }
+                if (k != null) found = v to k
+                return
+            }
+            if (v is android.view.ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        walk(root)
+        return found
+    }
+
+    /** 全屏手势：点键盘上某个名字的键（空格上屏、中英切换） */
+    fun tapKeyNamed(name: String): Boolean {
+        val (v, k) = findKey(name) ?: return false
+        L.i("全屏手势：点击「${k.speakable()}」")
+        tap(v, k)
+        return true
+    }
+
+    /** 全屏手势：点键盘窗口里的一个控件（菜单按钮这类） */
+    fun tapViewOnScreen(root: View, v: View) = tapView(root, v)
+
+    /**
+     * 全屏手势的语音输入：第一次执行按下空格并一直按着（豆包开始录音），
+     * 第二次执行松开（结束录音）。说话期间手指不用按着屏幕。
+     */
+    fun toggleVoice(): Boolean {
+        val hk = holding
+        val hv = holdView
+        if (hk != null && hv != null && holdIsVoice) {
+            L.i("全屏手势：松开空格结束语音")
+            release(hv, hk, MotionEvent.ACTION_UP, lastRawX, lastRawY)
+            return false
+        }
+        if (hk != null) cancelHold()
+        val (v, k) = findKey("空格") ?: run {
+            Speaker.speak("没找到空格键")
+            return false
+        }
+        val vl = IntArray(2)
+        v.getLocationOnScreen(vl)
+        holding = k
+        holdView = v
+        holdIsVoice = true
+        voiceZone = ""
+        holdDownTime = SystemClock.uptimeMillis()
+        lastRawX = vl[0] + k.rect.exactCenterX()
+        lastRawY = vl[1] + k.rect.exactCenterY()
+        L.i("全屏手势：按下空格开始语音")
+        inject(v, holdDownTime, MotionEvent.ACTION_DOWN, lastRawX, lastRawY)
+        return true
+    }
+
+    /** 正在按住空格说话（全屏模式退出、键盘收起时要松开） */
+    fun voiceHeld(): Boolean = holding != null && holdIsVoice
+
+    /** 松开按住的空格（兜底） */
+    fun releaseVoice() {
+        val hv = holdView ?: return
+        val hk = holding ?: return
+        if (!holdIsVoice) return
+        release(hv, hk, MotionEvent.ACTION_UP, lastRawX, lastRawY)
+    }
+
+    /**
+     * 撤掉当前这一次“摸键”：取消停留计时、松开已经按住的长按、忘掉摸到的键。
+     * 全屏触摸层要用——第一根手指已经摸到键并开始朗读了，紧跟着又落下第二根手指（双指手势），
+     * 这时要把第一根手指的事全撤掉，不能让它在抬手时把那个键打出去。
+     */
+    fun cancelExplore() {
+        cancelHold()
+        current = null
+        passThrough = false
+        nativeVoiceKb = null
     }
 
     fun reset() {

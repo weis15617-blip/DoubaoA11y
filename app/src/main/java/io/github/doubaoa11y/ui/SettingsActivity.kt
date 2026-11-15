@@ -31,6 +31,9 @@ class SettingsActivity : Activity() {
         const val INPUT = "input"
         const val CANDIDATE = "candidate"
         const val STATE = "state"
+        const val VOICE = "voice"
+        const val GESTURE = "gesture"
+        const val EDITOPTS = "editopts"
         const val WORDS = "words"
         const val HELP = "help"
         const val ADVANCED = "advanced"
@@ -55,6 +58,8 @@ class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        ConfigSpec.migrateGestureDefaults(prefs)
+        ConfigSpec.migrateEditOptions(prefs)
         autoOffLog()
         pad = (16 * resources.displayMetrics.density).toInt()
         page = intent.getStringExtra(EXTRA_PAGE) ?: HOME
@@ -85,6 +90,9 @@ class SettingsActivity : Activity() {
         INPUT -> "输入方式"
         CANDIDATE -> "候选与朗读"
         STATE -> "提示与震动"
+        VOICE -> "语音播报"
+        GESTURE -> "全屏与手势"
+        EDITOPTS -> "自定义编辑选项"
         WORDS -> "自定义解释词"
         HELP -> "使用帮助"
         ADVANCED -> "高级"
@@ -120,6 +128,9 @@ class SettingsActivity : Activity() {
                 addGroup(root, Group.VIBRATE)
                 root.addView(note("提示：豆包原生震动与声音请在豆包输入法app内调整"))
             }
+            VOICE -> VoicePage.fill(this, root)
+            GESTURE -> GesturePage.fill(this, root)
+            EDITOPTS -> EditOptsPage.fill(this, root)
             HELP -> HelpPage.fill(this, root)
             ADVANCED -> advanced(root)
         }
@@ -151,7 +162,7 @@ class SettingsActivity : Activity() {
         root.addView(button("检查更新") { Updater.check(this, upd) })
 
         root.addView(heading("设置"))
-        for (p in listOf(INPUT, CANDIDATE, STATE, WORDS, HELP, ADVANCED)) root.addView(entry(p))
+        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, WORDS, HELP, ADVANCED)) root.addView(entry(p))
 
         root.addView(heading("关于"))
         root.addView(info("作者：$AUTHOR"))
@@ -255,7 +266,7 @@ class SettingsActivity : Activity() {
     }
 
     /** 按给定顺序加开关或选择项（开关的提示跟在下面） */
-    private fun addKeys(parent: LinearLayout, vararg keys: String) {
+    fun addKeys(parent: LinearLayout, vararg keys: String) {
         for (k in keys) {
             val b = ConfigSpec.items.firstOrNull { it.key == k }
             if (b != null) {
@@ -275,6 +286,7 @@ class SettingsActivity : Activity() {
             val e = prefs.edit().putBoolean(item.key, checked)
             if (item.key == "runLog" && checked) e.putLong(LOG_SINCE, System.currentTimeMillis())
             e.apply()
+            if ((item.key == "speakByReader" && checked) || (item.key == "moduleOn" && !checked)) io.github.doubaoa11y.SpeechEngine.stop()
             send(null)
         }
     }
@@ -346,11 +358,37 @@ class SettingsActivity : Activity() {
         setOnClickListener { onClick() }
     }
 
+    fun rebuild() = build()
+    fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    fun switchOf(item: ConfigSpec.Item) = switch(item)
+    fun addKeysNoHint(root: LinearLayout, vararg keys: String) = addKeys(root, *keys)
+    fun editOptions(): List<Int> = ConfigSpec.parseEditOptions(prefs.getString(ConfigSpec.EDIT_OPTIONS_KEY, ""))
+    fun saveEditOptions(ids: List<Int>) {
+        prefs.edit().putString(ConfigSpec.EDIT_OPTIONS_KEY, ConfigSpec.encodeEditOptions(ids)).apply()
+        send(null)
+    }
+    fun restoreGestureDefaults() {
+        val e = prefs.edit()
+        for ((slot, _) in ConfigSpec.GESTURE_SLOTS) e.putInt(ConfigSpec.gestureKey(slot), ConfigSpec.gestureDefault(slot))
+        for (key in listOf("fsDrag", "fsHaptic", "fsSpeakAction", "fsSpeakChar", "fsCandidateFirst")) e.remove(key)
+        e.remove(ConfigSpec.EDIT_OPTIONS_KEY).apply()
+        send(null); build()
+    }
+    fun textField(root: LinearLayout, label: String, key: String, hint: String) {
+        root.addView(button(label) {
+            val input = android.widget.EditText(this).apply { setText(prefs.getString(key, "")); this.hint = hint }
+            AlertDialog.Builder(this).setTitle(label).setView(input).setPositiveButton("保存") { _, _ ->
+                prefs.edit().putString(key, input.text.toString().take(16000)).apply(); send(null); build()
+            }.setNegativeButton("取消", null).show()
+        })
+    }
+
     /** 把全部设置值（和可选命令）发给豆包进程；用有序广播拿回执 */
     fun send(cmd: String?) {
         val intent = Intent(ConfigSpec.ACTION_CONFIG).setPackage(ConfigSpec.TARGET_PACKAGE)
         for (item in ConfigSpec.items) intent.putExtra(item.key, prefs.getBoolean(item.key, item.default))
         for (item in ConfigSpec.intItems) intent.putExtra(item.key, prefs.getInt(item.key, item.default))
+        for (item in ConfigSpec.strItems) intent.putExtra(item.key, prefs.getString(item.key, item.default) ?: item.default)
         intent.putExtra(ConfigSpec.EXTRA_CUSTOM_WORDS, prefs.getString(PREF_WORDS, "") ?: "")
         if (cmd != null) intent.putExtra(ConfigSpec.EXTRA_CMD, cmd)
         try {

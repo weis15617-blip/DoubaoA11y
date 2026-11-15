@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 /** 豆包进程里的设置。没有 Context 之前使用默认值。 */
 object Config {
     private val values = ConcurrentHashMap(ConfigSpec.defaults)
+    private val strs = ConcurrentHashMap(ConfigSpec.strDefaults)
     private var prefs: SharedPreferences? = null
 
     fun b(key: String): Boolean =
@@ -16,6 +17,8 @@ object Config {
     private val ints = ConcurrentHashMap(ConfigSpec.intDefaults)
 
     fun i(key: String): Int = ints[key] ?: 0
+
+    fun s(key: String): String = strs[key] ?: ""
 
     fun setInt(key: String, v: Int) {
         if (!ConfigSpec.intDefaults.containsKey(key)) return
@@ -27,21 +30,127 @@ object Config {
         }
     }
 
+    fun setStr(key: String, v: String) {
+        if (!ConfigSpec.strDefaults.containsKey(key)) return
+        strs[key] = v
+        try {
+            prefs?.edit()?.putString(key, v)?.apply()
+        } catch (t: Throwable) {
+            L.e("保存设置失败", t)
+        }
+    }
+
     fun load(ctx: Context) {
         try {
             val p = ctx.getSharedPreferences(ConfigSpec.PREFS_NAME, Context.MODE_PRIVATE)
             prefs = p
-            for (item in ConfigSpec.items) {
-                values[item.key] = p.getBoolean(item.key, item.default)
-            }
-            for (item in ConfigSpec.intItems) {
-                ints[item.key] = p.getInt(item.key, item.default)
-            }
+            // 仅补充缺省手势，不覆盖用户自定义。
+            ConfigSpec.migrateGestureDefaults(p)
+            ConfigSpec.migrateEditOptions(p)
+            applyPrefs(p)
             customWords = parseWords(p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, null))
         } catch (t: Throwable) {
             L.e("读取设置失败，使用默认值", t)
         }
     }
+
+    private fun applyPrefs(p: SharedPreferences) {
+        for (item in ConfigSpec.items) {
+            values[item.key] = p.getBoolean(item.key, item.default)
+        }
+        for (item in ConfigSpec.intItems) {
+            ints[item.key] = p.getInt(item.key, item.default)
+        }
+        for (item in ConfigSpec.strItems) {
+            strs[item.key] = p.getString(item.key, item.default) ?: item.default
+        }
+    }
+
+    /**
+     * 主动去模块设置页那边把配置拉一遍（只读 ContentProvider）。
+     *
+     * 设置页和豆包是两个进程，各有一份 SharedPreferences。广播只在两边都活着的时候有效，
+     * 豆包进程被冻结、刚开机、设置页改完就退出去，广播就丢了，豆包这边一直是默认值——
+     * 用户看到的就是“设置改了没作用”。所以每次键盘弹出前都来拉一次，广播只当“立刻生效”的加速。
+     *
+     * 返回 true 表示这次拉到了不一样的值。
+     */
+    fun pull(ctx: Context): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastPull < 800) return false
+        lastPull = now
+        return try {
+            val b = ctx.contentResolver.call(PULL_URI, "dump", null, null) ?: return false
+            var changed = false
+            val e = prefs?.edit()
+            for (item in ConfigSpec.items) {
+                if (!b.containsKey(item.key)) continue
+                val v = b.getBoolean(item.key, item.default)
+                if (values[item.key] != v) {
+                    values[item.key] = v
+                    changed = true
+                }
+                e?.putBoolean(item.key, v)
+            }
+            for (item in ConfigSpec.intItems) {
+                if (!b.containsKey(item.key)) continue
+                val v = b.getInt(item.key, item.default)
+                if (ints[item.key] != v) {
+                    ints[item.key] = v
+                    changed = true
+                }
+                e?.putInt(item.key, v)
+            }
+            for (item in ConfigSpec.strItems) {
+                if (!b.containsKey(item.key)) continue
+                val v = b.getString(item.key) ?: item.default
+                if (strs[item.key] != v) {
+                    strs[item.key] = v
+                    changed = true
+                }
+                e?.putString(item.key, v)
+            }
+            b.getString(ConfigSpec.EXTRA_CUSTOM_WORDS)?.let { w ->
+                if (w != lastWords) {
+                    lastWords = w
+                    customWords = parseWords(w)
+                    e?.putString(ConfigSpec.EXTRA_CUSTOM_WORDS, w)
+                    changed = true
+                }
+            }
+            if (changed) {
+                e?.apply()
+                L.i("已从设置页同步配置：${summary()}")
+            }
+            changed
+        } catch (t: Throwable) {
+            // 模块没装、provider 没起来、跨进程被拦：都不影响，继续用现有配置
+            L.w("从设置页同步配置失败：${t.javaClass.simpleName} ${t.message ?: ""}")
+            false
+        }
+    }
+
+    private var lastPull = 0L
+    private var lastWords = ""
+
+    /**
+     * 把某个设置值写回设置页那一份（豆包进程里改的设置也要能持久）。
+     * 不写回去的话，下次弹键盘 [pull] 会拿旧的覆盖回来。
+     */
+    fun push(ctx: Context?, key: String, v: Int) {
+        if (ctx == null) return
+        try {
+            val b = android.os.Bundle().apply { putInt(key, v) }
+            ctx.contentResolver.call(PUSH_URI, "set", null, b)
+        } catch (t: Throwable) {
+            L.w("写回设置页失败（$key）：${t.javaClass.simpleName}")
+        }
+    }
+
+
+    /** 设置页那边的只读 ContentProvider（见 SettingsProvider） */
+    private val PULL_URI = android.net.Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config")
+    private val PUSH_URI = android.net.Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config")
 
     fun set(key: String, v: Boolean) {
         if (!ConfigSpec.defaults.containsKey(key)) return
@@ -82,9 +191,16 @@ object Config {
     fun reset() {
         for (item in ConfigSpec.items) set(item.key, item.default)
         for (item in ConfigSpec.intItems) setInt(item.key, item.default)
+        for (item in ConfigSpec.strItems) setStr(item.key, item.default)
     }
+
+    /** 当前输入方式：半屏输入、标准输入或全屏输入 */
+    val typeMode: Int get() = i("typeMode")
+
+    val fullscreen: Boolean get() = typeMode == io.github.doubaoa11y.ConfigSpec.TYPE_FULLSCREEN
 
     fun summary(): String =
         ConfigSpec.items.joinToString("，") { "${it.key}=${if (b(it.key)) "开" else "关"}" } +
-            ConfigSpec.intItems.joinToString("") { "，${it.key}=${i(it.key)}" }
+            ConfigSpec.intItems.joinToString("") { "，${it.key}=${i(it.key)}" } +
+            ConfigSpec.strItems.joinToString("") { "，${it.key}=${s(it.key)}" }
 }

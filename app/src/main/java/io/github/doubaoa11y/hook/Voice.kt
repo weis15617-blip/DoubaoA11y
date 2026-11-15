@@ -198,6 +198,7 @@ object Voice {
     private fun onStop() {
         if (!recording) return
         recording = false
+        KeyboardOps.onVoiceStopped()
         stopAt = SystemClock.uptimeMillis()
         sessionUntil = stopAt + 5000
         L.i("语音：结束录音")
@@ -206,6 +207,8 @@ object Voice {
         main.removeCallbacksAndMessages(token)
         main.postAtTime({ speakFinal("超时") }, token, stopAt + 2500)
     }
+
+    fun isRecording(): Boolean = recording
 
     private fun inSession(): Boolean = recording || SystemClock.uptimeMillis() < sessionUntil
 

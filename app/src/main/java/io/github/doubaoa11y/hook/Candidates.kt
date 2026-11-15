@@ -34,6 +34,15 @@ object Candidates {
     /** 正在打拼音、候选栏里有候选 */
     val composing: Boolean get() = pinyin.isNotBlank() && current.any { it.isNotBlank() }
 
+    private var cursorMoved = false
+    fun hasCandidates(): Boolean = composing && !cursorMoved
+    fun prev(): Boolean { if (!composing) return false; move(-1); return true }
+    fun next(): Boolean { if (!composing) return false; move(1); return true }
+    fun commit(): Boolean = composing && VirtualKeys.tapKeyNamed("空格")
+    fun markTyping() { cursorMoved = false }
+    fun onCursorMove() { cursorMoved = true }
+    fun onDelete() { reset("删除候选") }
+
     private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
 
     /**
@@ -220,6 +229,7 @@ object Candidates {
         current = list
         engineIdx = eng
         pinyin = py
+        if (oldPy != py) cursorMoved = false
         val lk = py + "|" + list.joinToString("|")
         val waiting = loadingFrom
         if (lk != listKey) {

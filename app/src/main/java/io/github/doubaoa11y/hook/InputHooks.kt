@@ -1,6 +1,8 @@
 package io.github.doubaoa11y.hook
 
 import android.inputmethodservice.InputMethodService
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
 import java.util.Collections
@@ -14,6 +16,19 @@ object InputHooks {
     private val hookedClasses = Collections.synchronizedSet(HashSet<Class<*>>())
     private val I = Int::class.javaPrimitiveType!!
 
+    private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * 删字之后编辑框可能空了：隔一会儿问一次，好把编辑选项换回“粘贴 / 收起键盘”。
+     * 删除是逐次触发的（长按连删会连着来），所以合并一下。
+     */
+    private val emptyCheck = Runnable { EditOptions.refresh("删字后") }
+
+    fun noteDeleted() {
+        main.removeCallbacks(emptyCheck)
+        main.postDelayed(emptyCheck, 90)
+    }
+
     /** 上屏监听（后面阶段用来朗读上屏内容） */
     private val commitListeners = ArrayList<(String, String) -> Unit>()
 
@@ -23,6 +38,14 @@ object InputHooks {
 
     private val composingListeners = ArrayList<(String) -> Unit>()
     private val finishListeners = ArrayList<() -> Unit>()
+    private val deleteListeners = ArrayList<() -> Unit>()
+
+    /** 删除监听带内容：删掉的是哪个字（拿不到就是空串） */
+    private val deleteTextListeners = ArrayList<(String) -> Unit>()
+
+    fun onDeleteText(l: (String) -> Unit) {
+        deleteTextListeners.add(l)
+    }
 
     fun onComposing(l: (String) -> Unit) {
         composingListeners.add(l)
@@ -32,7 +55,14 @@ object InputHooks {
         finishListeners.add(l)
     }
 
+    /** 删字（deleteSurroundingText，或者发了个删除键）：候选栏要变了 */
+    fun onDelete(l: () -> Unit) {
+        deleteListeners.add(l)
+    }
+
     fun install() {
+        // 键盘上直接按删除键（豆包原生删除，非手势）：选择态下删掉选中文本就自动退出选择态
+        onDelete { EditActions.onExternalDelete() }
         Hooker.method(InputMethodService::class.java, "getCurrentInputConnection", arrayOf(),
             SafeHook("getCurrentInputConnection", after = { p ->
                 val ic = p.result as? InputConnection ?: return@SafeHook
@@ -95,6 +125,26 @@ object InputHooks {
                     for (l in composingListeners) l(t)
                 }
                 if (name == "finishComposingText") for (l in finishListeners) l()
+                if (name == "deleteSurroundingText") {
+                    // 必须在原方法执行前把要删的字读出来（执行完就取不到了）
+                    val n = (p.args.getOrNull(0) as? Int) ?: 0
+                    val gone = deletedPreview(p.thisObject as? InputConnection, n, false)
+                    for (l in deleteListeners) l()
+                    if (gone.isNotEmpty()) for (l in deleteTextListeners) l(gone)
+                    noteDeleted()
+                }
+                if (name == "sendKeyEvent") {
+                    val e = p.args[0] as? KeyEvent
+                    if (e != null && e.action == KeyEvent.ACTION_DOWN &&
+                        (e.keyCode == KeyEvent.KEYCODE_DEL || e.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
+                    ) {
+                        val fwd = e.keyCode == KeyEvent.KEYCODE_FORWARD_DEL
+                        val gone = deletedPreview(p.thisObject as? InputConnection, 1, fwd)
+                        for (l in deleteListeners) l()
+                        if (gone.isNotEmpty()) for (l in deleteTextListeners) l(gone)
+                        noteDeleted()
+                    }
+                }
             } catch (t: Throwable) {
                 L.hookError("IC.listeners", t)
             }
@@ -108,9 +158,18 @@ object InputHooks {
             } catch (t: Throwable) {
                 L.hookError("Voice.intercept", t)
             }
+            // 组字也是“编辑框里有内容”（拼音还没上屏、语音留着的中间结果写进去），
+            // 编辑选项不能因为“还没 commitText”就继续停在粘贴/收起键盘
+            if (name == "setComposingText") {
+                val t = p.args[0]?.toString() ?: ""
+                if (t.isNotBlank()) EditOptions.markTyped()
+            }
             if (name == "commitText") {
                 val text = p.args[0]?.toString() ?: return@SafeHook
                 val src = caller()
+                // 上屏了字＝编辑框不再空：编辑选项立刻换成完整列表并停在“默认”，
+                // 不用跨进程去问（这一步每打一个字都会走，问一次太贵）
+                if (text.isNotBlank()) EditOptions.markTyped()
                 for (l in commitListeners) {
                     try {
                         l(text, src)
@@ -120,6 +179,18 @@ object InputHooks {
                 }
             }
         }))
+    }
+
+    /** 这次删除会删掉哪几个字（取不到返回空串，不影响删除本身） */
+    private fun deletedPreview(ic: InputConnection?, n: Int, forward: Boolean): String {
+        if (ic == null || n <= 0 || deleteTextListeners.isEmpty()) return ""
+        return try {
+            @Suppress("DEPRECATION")
+            val t = if (forward) ic.getTextAfterCursor(n.coerceAtMost(32), 0) else ic.getTextBeforeCursor(n.coerceAtMost(32), 0)
+            t?.toString()?.takeLast(n) ?: ""
+        } catch (_: Throwable) {
+            ""
+        }
     }
 
     /** 调用栈里豆包自己的前几层，用来区分键盘、手写、语音上屏 */
