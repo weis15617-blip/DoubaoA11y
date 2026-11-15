@@ -74,6 +74,9 @@ object ConfigSpec {
             "提示：豆包原生操作为：短按语音输入，空格上左右滑动可移动光标"),
         Item("nativeDelete", "删除键改为豆包原生操作", false, Group.FAST,
             "提示：豆包原生操作为：短按即可快速删除，按住左滑可以清空候选字"),
+        Item("nativeEnter", "回车键改为豆包原生操作", false, Group.FAST,
+            "提示：仅在快速输入或触摸浏览关闭、触摸直接到键盘时生效。打开后回车、发送键交给豆包处理，" +
+                "短按、长按和滑动行为以豆包设置为准；模块的回车键停留时间不再生效"),
         // 候选词解释
         Item("charExplain", "字词解释", true, Group.CANDIDATE),
         Item("candidateNav", "逗号、句号切换候选", true, Group.CANDIDATE,
@@ -463,6 +466,7 @@ object ConfigSpec {
         ), Group.INPUT),
         IntItem("deleteHoldMs", "删除键停留时间", 1500, holdOptions, Group.HOLD),
         IntItem("spaceHoldMs", "空格键停留时间", 1000, holdOptions, Group.HOLD),
+        IntItem("enterHoldMs", "回车键停留时间", 1000, holdOptions, Group.HOLD),
         IntItem("explainMaxLen", "逐字解释字数", 0, listOf(
             0 to "全部", 1 to "1 个字", 2 to "2 个字", 3 to "3 个字", 4 to "4 个字", 5 to "5 个字",
         ), Group.CANDIDATE),
