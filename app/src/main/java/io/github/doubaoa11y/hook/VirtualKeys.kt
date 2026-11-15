@@ -791,11 +791,12 @@ object VirtualKeys {
         return when {
             n == "删除" -> Config.i("deleteHoldMs").toLong().coerceIn(500, 5000)
             n == "空格" -> Config.i("spaceHoldMs").toLong().coerceIn(500, 5000)
+            (n == "回车" || n == "发送") && explorer -> Config.i("enterHoldMs").toLong().coerceIn(500, 5000)
             else -> null
         }
     }
 
-    /** 手指停在删除或空格上：提前按下，让原生层的 500 毫秒长按刚好在设定时间触发 */
+    /** 手指停在删除、空格或回车上：提前按下，让原生层长按在设定时间触发 */
     private fun scheduleHold(v: View, k: Key) {
         val total = holdMsFor(k) ?: return
         if (!Config.b("liftToType")) return
@@ -1019,11 +1020,12 @@ object VirtualKeys {
                 current = null
                 return false
             }
-            // 空格、删除默认由模块处理（摸到读、抬手输入、停留语音或连续删除）；
+            // 空格、删除、回车默认由模块处理；
             // 设置里改成豆包原生操作时，整串触摸交给豆包。用逗号句号选了别的候选时，空格仍由模块上屏那个候选
             val n = t?.key?.mainName()
             val native = (n == "空格" && Config.b("nativeSpace") && Candidates.sel <= 0) ||
-                (n == "删除" && Config.b("nativeDelete"))
+                (n == "删除" && Config.b("nativeDelete")) ||
+                ((n == "回车" || n == "发送") && Config.b("nativeEnter"))
             if (native) {
                 passThrough = true
                 cancelHold()

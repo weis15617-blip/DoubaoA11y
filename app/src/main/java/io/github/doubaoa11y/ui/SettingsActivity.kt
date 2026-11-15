@@ -105,7 +105,7 @@ class SettingsActivity : Activity() {
                 root.addView(note("可切换抬手输入与标准输入"))
                 root.addView(heading("延迟调整"))
                 addGroup(root, Group.HOLD)
-                root.addView(note("提示：删除键停留可快速删除，空格键停留进行语音输入"))
+                root.addView(note("提示：停留在删除键可连续删除，空格键可开始语音；模块按抬手方式处理时，回车、发送键停留可触发豆包长按行为。标准输入的双击操作保持原样；改为豆包原生操作的键不使用模块停留时间"))
                 root.addView(heading("快速输入"))
                 addGroup(root, Group.FAST)
             }
