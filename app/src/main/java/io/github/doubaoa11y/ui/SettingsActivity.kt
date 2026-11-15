@@ -81,6 +81,11 @@ class SettingsActivity : Activity() {
         if (page == HOME && Disclaimer.agreed(this)) send(ConfigSpec.CMD_STATUS)
     }
 
+    override fun onDestroy() {
+        SettingsBackup.detach(this)
+        super.onDestroy()
+    }
+
     /** “记录日志”开了 1 小时就关掉（豆包那边也会自己关，这里同步，免得打开设置页又把它打开） */
     private fun autoOffLog() {
         if (!prefs.getBoolean("runLog", false)) return
@@ -217,6 +222,8 @@ class SettingsActivity : Activity() {
         root.addView(heading("桌面图标"))
         root.addView(launcherToggle())
         root.addView(note("关闭后隐藏桌面图标，仍可从 LSPosed 或 LSPatch 的模块设置打开；重新开启或恢复默认即可显示图标。桌面可能稍后才刷新"))
+
+        SettingsBackup.fill(this, root)
 
         root.addView(heading("问题反馈"))
         root.addView(note("遇到问题时：1. 打开“记录日志”；2. 回去重现一次问题；3. 回到这里点“复制日志”粘贴发给作者，日志很长就点“保存日志文件”，在 QQ 里把文件发给作者。"))
@@ -432,6 +439,12 @@ class SettingsActivity : Activity() {
                 prefs.edit().putString(key, input.text.toString().take(16000)).apply(); send(null); build()
             }.setNegativeButton("取消", null).show()
         })
+    }
+
+    @Deprecated("系统文件选择器结果")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        SettingsBackup.onResult(this, requestCode, resultCode, data?.data)
     }
 
     /** 把全部设置值（和可选命令）发给豆包进程；用有序广播拿回执 */
