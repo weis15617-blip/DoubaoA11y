@@ -8,6 +8,7 @@
     <!-- 需要能“看见”豆包输入法，才能给它发设置广播 -->
     <queries>
         <package android:name="com.bytedance.android.doubaoime" />
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
     </queries>
 
     <application
@@ -29,6 +30,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <provider android:name=".SettingsProvider" android:authorities="io.github.doubaoa11y.settings" android:exported="true" />
 
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data android:name="xposeddescription" android:value="@string/xposed_description" />

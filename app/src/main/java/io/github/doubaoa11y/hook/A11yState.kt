@@ -22,17 +22,20 @@ object A11yState {
 
     val active: Boolean get() = moduleOn && (sysActive || Config.b("forceEnable"))
 
+    /** 当前正在用的读屏包名（认出来的第一个） */
+    @Volatile
+    var readerPackage: String = ""
+        private set
+
     /**
      * 记录绘制和回调：只要读屏开着就记录（不管触摸探索）。
      * 用户手写、打字、语音时常会临时关掉触摸探索，键位表和日志不能因此断掉。
      */
     val recording: Boolean get() = moduleOn && (sysEnabled || active)
 
-    /**
-     * 读屏开着、触摸浏览关着：手指的触摸直接到输入法。
-     * 打开“触摸浏览关闭时仍用读屏操作”后，模块把触摸当成摸和抬手来处理（按下、移动朗读，抬起输入）。
-     */
+    /** 触摸浏览关着时沿用主线直接触摸路径，不主动改全局状态。 */
     val directTouch: Boolean get() = moduleOn && sysEnabled && !sysActive && !Config.b("forceEnable") && Config.b("directTouch")
+    val explorationOff: Boolean get() = !sysActive
 
     fun init(ctx: Context) {
         if (am != null) return
@@ -64,10 +67,13 @@ object A11yState {
         } catch (t: Throwable) {
             false
         }
-        reader = touch || readerOn(m)
+        // 先查读屏（会更新 readerPackage），再看触摸探索：触摸浏览开着时也要知道是哪个读屏
+        val readerNow = readerOn(m)
+        reader = touch || readerNow
         sysEnabled = reader
         sysActive = touch
-        L.i("无障碍状态（$why）：读屏=$reader 触摸探索=$touch 强制=${Config.b("forceEnable")} → 模块${if (active) "启用" else "停用"}")
+        L.i("无障碍状态（$why）：读屏=$reader 触摸探索=$touch 强制=${Config.b("forceEnable")} 读屏包名=${readerPackage.ifEmpty { "未识别" }} → 模块${if (active) "启用" else "停用"}")
+        FullscreenMode.refresh("无障碍状态变化")
         lastActive = active
         if (was != active) {
             for (l in listeners) {
@@ -90,6 +96,9 @@ object A11yState {
         "com.google.android.marvin.talkback", "com.android.tback", "com.nirenr.talkman",
         "com.dianming.phoneapp", "com.bjbyhd.voiceback", "com.bjbyhd.screenreader",
         "com.samsung.android.accessibility.talkback",
+        // TalkBack 的魔改版（参考实现 sandfly，包名 io.github.aaron_gh.sandfly）。
+        // 它的触摸浏览方案和官方 TalkBack 完全一样，所以适配方式也照 TalkBack 那一套。
+        "io.github.aaron_gh.sandfly",
     )
 
     /**
@@ -111,25 +120,38 @@ object A11yState {
     /**
      * 有没有开着读屏。只看“有无障碍服务开着”不够：李跳跳、GKD、MacroDroid 这类工具也是无障碍服务，还会声明语音反馈。
      * 认得的读屏、申请了触摸浏览的、类名像读屏的直接算；剩下的只要不在“肯定不是读屏”名单里，也算读屏。
+     * 顺便记下第一个认出来的读屏包名，全屏输入时按它判断有没有暂停触摸浏览的接口。
      */
     private fun readerOn(m: AccessibilityManager): Boolean = try {
-        if (!m.isEnabled) false
-        else m.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any { info ->
-            val si = info.resolveInfo?.serviceInfo
-            val pkg = si?.packageName ?: ""
-            val cls = si?.name ?: ""
-            when {
-                pkg.isEmpty() -> false
-                (info.flags and android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE) != 0 -> true
-                pkg in readerPackages -> !cls.contains("SelectToSpeak")
-                cls.endsWith("TalkBackService") || cls.endsWith("SoundBackService") || cls.contains("ScreenReader") -> true
-                notReaderClasses.any { cls.contains(it) } -> false
-                notReaderPrefixes.any { pkg.startsWith(it) } -> false
-                else -> {
-                    L.i("不认识的无障碍服务，当成读屏：$pkg/$cls")
-                    true
+        if (!m.isEnabled) {
+            readerPackage = ""
+            false
+        } else {
+            var found = false
+            var pkgFound = ""
+            for (info in m.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)) {
+                val si = info.resolveInfo?.serviceInfo
+                val pkg = si?.packageName ?: ""
+                val cls = si?.name ?: ""
+                if (pkg.isEmpty()) continue
+                val yes = when {
+                    (info.flags and android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE) != 0 -> true
+                    pkg in readerPackages -> !cls.contains("SelectToSpeak")
+                    cls.endsWith("TalkBackService") || cls.endsWith("SoundBackService") || cls.contains("ScreenReader") -> true
+                    notReaderClasses.any { cls.contains(it) } -> false
+                    notReaderPrefixes.any { pkg.startsWith(it) } -> false
+                    else -> {
+                        L.i("不认识的无障碍服务，当成读屏：$pkg/$cls")
+                        true
+                    }
+                }
+                if (yes) {
+                    found = true
+                    if (pkgFound.isEmpty()) pkgFound = pkg
                 }
             }
+            readerPackage = pkgFound
+            found
         }
     } catch (t: Throwable) {
         L.e("检查读屏失败", t)

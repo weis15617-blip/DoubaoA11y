@@ -27,10 +27,19 @@ object ServiceHooks {
         Hooker.method(c, "onStartInputView", arrayOf(EditorInfo::class.java, Boolean::class.javaPrimitiveType!!),
             SafeHook("onStartInputView", after = { p ->
                 val ei = p.args[0] as? EditorInfo
+                appContext?.let { Config.pull(it) }
+                EditOptions.reset()
+                EditActions.onWindowHidden()
                 Candidates.reset("换输入框")
+                FullscreenMode.refresh("换输入框")
                 L.i("onStartInputView 应用=${ei?.packageName} 输入类型=0x${Integer.toHexString(ei?.inputType ?: 0)} 回车动作=0x${Integer.toHexString(ei?.imeOptions ?: 0)} 重启=${p.args[1]}")
             }))
         installHideHooks(cl)
+        Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
+            SafeHook("fullscreen.insets", after = { p -> FullscreenMode.onComputeInsets(p.args[0]) }))
+        Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { _ ->
+            FullscreenMode.shutdown(); EditOptions.onKeyboardHidden(); Speaker.stop()
+        }))
         Hooker.method(c, "onWindowShown", arrayOf(), SafeHook("onWindowShown", after = { _ ->
             L.i("键盘窗口显示（${A11yState.describe()}）")
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
@@ -42,11 +51,22 @@ object ServiceHooks {
             }
             KeyboardState.onShown()
             TatansBridge.onShown()
+            FullscreenMode.onWindowShown()
+            if (FullscreenMode.wanted) {
+                EditActions.onWindowShown()
+                EditOptions.onKeyboardShown()
+            }
+            Speaker.prepareTts()
             ViewA11yHooks.service?.window?.window?.decorView?.let { StretchPanel.watch(it) }
             windowShown = true
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
         }))
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
+            FullscreenMode.onWindowHidden()
+            EditOptions.onKeyboardHidden()
+            EditActions.onWindowHidden()
+            Speaker.stop()
+            KeyboardOps.resetVoice()
             Voice.onInputEnd()
             Candidates.reset("键盘收起")
             TatansBridge.onHidden()
@@ -66,6 +86,11 @@ object ServiceHooks {
     /** 键盘开始收起：在收起动画开始时就提示，同一次收起只读一次 */
     private fun onHiding(from: String) {
         L.i("键盘开始收起（$from）")
+        FullscreenMode.onWindowHidden()
+        EditOptions.onKeyboardHidden()
+        EditActions.onWindowHidden()
+        Speaker.stop()
+        KeyboardOps.resetVoice()
         KeyboardState.onHidden()
         TatansBridge.onHidden()
     }
@@ -118,11 +143,22 @@ object ServiceHooks {
         val ctx = service.applicationContext ?: service
         appContext = ctx
         Config.load(ctx)
+        Config.pull(ctx)
         LogStore.init(ctx)
         Speaker.init(ctx)
         Haptic.init(ctx)
         A11yState.init(ctx)
         TatansBridge.init(ctx)
+        A11yState.onChange { FullscreenMode.refresh("读屏状态变化") }
+        val screen = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                if (i.action == Intent.ACTION_SCREEN_OFF) {
+                    FullscreenMode.shutdown(); EditOptions.onKeyboardHidden(); Speaker.stop()
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(screen, IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED)
+        else ctx.registerReceiver(screen, IntentFilter(Intent.ACTION_SCREEN_OFF))
         L.i("模块初始化完成。${versionInfo(ctx)}。${A11yState.describe()}。${Hooker.summary()}。设置：${Config.summary()}")
         if (Config.b("traceAllJni")) JniHooks.installTraceAll()
         registerReceiver(ctx)
@@ -187,12 +223,18 @@ object ServiceHooks {
             for (item in ConfigSpec.intItems) {
                 if (ex.containsKey(item.key)) Config.setInt(item.key, ex.getInt(item.key, item.default))
             }
+            for (item in ConfigSpec.strItems) {
+                if (ex.containsKey(item.key)) Config.setStr(item.key, ex.getString(item.key).orEmpty().take(16000))
+            }
             if (ex.containsKey(ConfigSpec.EXTRA_CUSTOM_WORDS)) Config.setCustomWords(ex.getString(ConfigSpec.EXTRA_CUSTOM_WORDS) ?: "")
         }
         LogStore.onConfig(logWasOn)
         L.i("收到设置（cmd=$cmd）：${Config.summary()}")
         TatansBridge.refresh("设置变化")
         A11yState.refresh("设置变化")
+        FullscreenMode.refresh("设置变化")
+        if (!FullscreenMode.wanted) EditOptions.onKeyboardHidden()
+        if (!A11yState.moduleOn || Config.b("speakByReader")) Speaker.stop()
         if (cmd == ConfigSpec.CMD_DUMP) {
             L.forceUntil = android.os.SystemClock.uptimeMillis() + 3000
             KeyboardViewHooks.dumpAll("手动输出")
@@ -222,7 +264,7 @@ object ServiceHooks {
             VirtualKeys.enabled -> "模块已生效"
             else -> "模块已加载，但没有接管键盘（读屏没开）"
         }
-        return "$on。${A11yState.describeShort()}。$ver"
+        return "$on。${A11yState.describeShort()}。${if (Config.fullscreen) FullscreenMode.status() else ""}。$ver"
     }
 
     fun status(ctx: Context): String =

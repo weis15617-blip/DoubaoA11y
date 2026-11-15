@@ -142,6 +142,11 @@ object KeyboardViewHooks {
                 if ((v as View).parent !is View) {
                     if (Config.b("logTouch") && ev.actionMasked != MotionEvent.ACTION_HOVER_MOVE)
                         L.i("根悬停 ${Fmt.action(ev.action)} x=${ev.x.toInt()} y=${ev.y.toInt()} t=${ev.eventTime}")
+                    // 全屏输入：上半屏是模块的手势层，先交给它
+                    if (FullscreenMode.onRootHover(v, ev)) {
+                        p.result = true
+                        return@SafeHook
+                    }
                     // 键盘窗口根视图：长按删除或语音时由它接管（语音界面会盖住键盘）
                     if (VirtualKeys.onRootHover(v, ev)) p.result = true
                     return@SafeHook
@@ -156,21 +161,32 @@ object KeyboardViewHooks {
         // 触摸浏览关着：手指触摸直接到键盘窗口，由模块当成摸和抬手处理
         Hooker.method(ViewGroup::class.java, "dispatchTouchEvent", arrayOf(MotionEvent::class.java),
             SafeHook("dispatchTouchEvent", before = { p ->
-                if (Config.b("logTouch") && (p.thisObject as View).parent !is View) {
-                    val e = p.args[0] as MotionEvent
-                    if (e.actionMasked != MotionEvent.ACTION_MOVE)
-                        L.i("根触摸 ${Fmt.action(e.action)} x=${e.x.toInt()} y=${e.y.toInt()} t=${e.eventTime} 走触摸=${VirtualKeys.touchMode} 天坦=${TatansBridge.requested}")
-                }
-                if (!VirtualKeys.touchMode || VirtualKeys.injecting) return@SafeHook
                 val v = p.thisObject as View
                 if (v.parent is View) return@SafeHook
+                val e = p.args[0] as MotionEvent
+                if (Config.b("logTouch") && e.actionMasked != MotionEvent.ACTION_MOVE) {
+                    L.i("根触摸 ${Fmt.action(e.action)} x=${e.x.toInt()} y=${e.y.toInt()} t=${e.eventTime} 走触摸=${VirtualKeys.touchMode} 穿透=${TatansBridge.requested} 全屏=${FullscreenMode.active}")
+                }
                 val imeRoot = try {
                     ViewA11yHooks.service?.window?.window?.decorView
                 } catch (_: Throwable) {
                     null
                 }
                 if (v !== imeRoot) return@SafeHook
-                if (VirtualKeys.onRootTouch(v, p.args[0] as MotionEvent)) p.result = true
+                // 全屏输入：整块窗口（上半屏手势区 + 下半屏键盘）都由模块自己的一套触摸浏览处理，
+                // 不看读屏的触摸浏览是开是关。见 FullscreenTouch
+                if (FullscreenTouch.handleTouch(v, e)) {
+                    p.result = true
+                    return@SafeHook
+                }
+                // 全屏时上面已经把这次触摸判过了（让路给豆包面板、手写区、原生空格/删除的会返回 false），
+                // 不能再走一遍半屏那条路，否则同一个按下会被判两次
+                if (Config.fullscreen && FullscreenMode.active) return@SafeHook
+                // 半屏输入：下半屏键盘区域走模块的“摸键读键抬手输入”。保益/点明关了触摸浏览后
+                // 也走这里（touchMode 已把 pausedByModule 算进去），摸到键会朗读、抬手输入，
+                // 不会把触摸穿透给豆包原生（那样会丢朗读）。
+                if (!VirtualKeys.touchMode || VirtualKeys.injecting) return@SafeHook
+                if (VirtualKeys.onRootTouch(v, e)) p.result = true
             }))
 
         // 虚拟按键节点

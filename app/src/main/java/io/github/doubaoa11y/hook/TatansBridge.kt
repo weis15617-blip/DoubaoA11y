@@ -121,9 +121,9 @@ object TatansBridge {
         }
     }
 
-    private fun wanted(): Boolean = Config.b("tatansFast") && A11yState.active && running(PKG)
+    private fun wanted(): Boolean = (Config.b("tatansFast") || FullscreenMode.active) && A11yState.active && running(PKG)
 
-    private fun talkmanWanted(): Boolean = Config.b("tatansFast") && A11yState.active && running(TALKMAN)
+    private fun talkmanWanted(): Boolean = (Config.b("tatansFast") || FullscreenMode.active) && A11yState.active && running(TALKMAN)
 
     /** 读屏状态、设置变化后：该连就连，不该连就撤掉穿透并断开 */
     fun refresh(why: String) {
@@ -210,6 +210,9 @@ object TatansBridge {
     private fun readerPanelOpen(): Boolean =
         CustomToolbar.editing() || imeRoot()?.let { Panels.find(it) } != null
 
+    fun panelOpen(): Boolean = try { readerPanelOpen() } catch (_: Throwable) { false }
+    fun clearPassThrough(why: String) { if (remote != null && !current.isEmpty) send(Rect(), why) }
+
     fun update(why: String) {
         val tatans = remote != null
         val talkman = try {
@@ -221,7 +224,10 @@ object TatansBridge {
         try {
             val want = Rect()
             // 双击输入时按键交给读屏焦点，不穿透
-            if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && VirtualKeys.keepFocus && !readerPanelOpen()) {
+            val full = FullscreenMode.windowRect()
+            if (full != null && A11yState.recording && !readerPanelOpen()) {
+                want.set(full)
+            } else if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && VirtualKeys.keepFocus && !readerPanelOpen()) {
                 val root = imeRoot()
                 val area = root?.let { r ->
                     val id = r.resources.getIdentifier("ime_inputview", "id", r.context.packageName)
