@@ -22,6 +22,7 @@ object JniHooks {
         "DoCommit",
         "notifyCandidateBarPinyin",
         "notifyCandidateBarSnapshot",
+        "notifyCandidateBarToolbarTab",
         "notifyMoreCandidateSnapshot",
         "onKeyboardBoardTypeChanged",
         "StartAsrOnSpaceLPress",
@@ -52,6 +53,23 @@ object JniHooks {
         Hooker.byName(c, "notifyCandidateBarSnapshot", SafeHook("candidate.speak", after = { p ->
             Candidates.onSnapshot(p.args)
         }))
+
+        // 删除全部拼音不一定再发候选快照，拼音栏清空也要结束候选导航。
+        Hooker.method(c, "notifyCandidateBarPinyin", arrayOf(String::class.java, String::class.java),
+            SafeHook("candidate.pinyinCleared", after = { p ->
+                if (p.args.size == 2 && p.args.all { it == null || (it is String && it.isBlank()) }) {
+                    Candidates.reset("拼音栏已空")
+                }
+            }))
+
+        // 1.5.5 删除最后一个拼音时只切回闲置工具栏，不发送空候选/空拼音快照。
+        // tab=0 是豆包的 show idle 分支；其他 tab 不代表结束组字，不能清理。
+        Hooker.method(c, "notifyCandidateBarToolbarTab",
+            arrayOf(Int::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!),
+            SafeHook("candidate.toolbarTab", after = { p ->
+                // 等原生删除调用返回再查询，避免回调中引擎状态尚未更新。
+                if (p.args.getOrNull(0) == 0) main.post { Candidates.onToolbarIdle() }
+            }))
 
         // 键盘类型切换：真正的处理被 post 到主线程，处理完再查询类型。
         // 这个 lambda 的编号随豆包版本变：1.5.4 是 $49，1.5.5 是 $51，豆包里有哪个就钩哪个

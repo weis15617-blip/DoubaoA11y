@@ -43,13 +43,15 @@ object Candidates {
     private fun navDir(k: Key): Int {
         if (!navOn) return 0
         val m = k.mainName()
-        when (m) {
-            "逗号" -> return -1
-            "句号" -> return 1
-        }
         if (KeyboardState.boardName == "九键拼音") {
             if (m == "123") return -1
             if (m == "中" || k.speakable() == "英文键盘") return 1
+            // 九键左侧符号栏仍然输入符号，不能套用全键的逗号、句号映射。
+            return 0
+        }
+        when (m) {
+            "逗号" -> return -1
+            "句号" -> return 1
         }
         return 0
     }
@@ -161,11 +163,27 @@ object Candidates {
      */
     fun install() {
         InputHooks.onCommit { _, _ -> reset("上屏") }
+        InputHooks.onComposing { text ->
+            if (text.isBlank()) reset("拼音删空")
+        }
+        InputHooks.onFinishComposing { reset("结束组字") }
+    }
+
+    /** 工具栏恢复闲置。豆包在短信快捷输入等场景可能忽略切换，先核对引擎确实已退出组字。 */
+    fun onToolbarIdle() {
+        if (pinyin.isEmpty() && current.isEmpty()) return
+        val j = JniHooks.jni() ?: return
+        try {
+            val typing = de.robv.android.xposed.XposedHelpers.callMethod(j, "isTypingInput") as? Boolean ?: return
+            L.i("工具栏恢复闲置：引擎组字=$typing")
+            if (!typing) reset("工具栏恢复，拼音已清空")
+        } catch (t: Throwable) {
+            L.hookError("Candidates.toolbarIdle", t)
+        }
     }
 
     fun reset(why: String) {
-        if (pinyin.isEmpty() && current.isEmpty()) return
-        L.i("候选状态清空（$why）")
+        if (pinyin.isNotEmpty() || current.isNotEmpty()) L.i("候选状态清空（$why）")
         current = emptyList()
         engineIdx = emptyList()
         pinyin = ""
@@ -173,12 +191,13 @@ object Candidates {
         listKey = ""
         last = ""
         loadingFrom = null
+        main.removeCallbacksAndMessages(token)
         main.removeCallbacksAndMessages(loadToken)
     }
 
     fun onSnapshot(args: Array<Any?>) {
         @Suppress("UNCHECKED_CAST")
-        val raw = (args.firstOrNull { it is Array<*> && it.isArrayOf<String>() } as? Array<String>)?.toList() ?: return
+        val raw = (args.firstOrNull { it is Array<*> && it.isArrayOf<String>() } as? Array<String>)?.toList().orEmpty()
         val py = args.firstOrNull { it is String } as? String ?: ""
         // 第 9 个参数是每项在引擎里的序号；“手写找字”这类入口不是候选，序号是 -1，跳过
         val idx = (args.getOrNull(8) as? IntArray)?.takeIf { it.size == raw.size }
@@ -189,6 +208,12 @@ object Candidates {
             if (e < 0) continue
             list.add(raw[k])
             eng.add(e)
+        }
+        // 删空时可能收到空数组或 null；也可能仅剩“手写找字”等非候选入口。
+        // 必须同时撤掉翻页等待和延迟朗读，避免旧候选继续影响空格、标点。
+        if (py.isBlank() || list.none { it.isNotBlank() }) {
+            reset("候选栏已空")
+            return
         }
         (args.getOrNull(0) as? Long)?.let { snapId = it }
         val oldPy = pinyin
