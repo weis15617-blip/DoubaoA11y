@@ -54,6 +54,8 @@ class SettingsActivity : Activity() {
     var pad = 0
         private set
     private var page = HOME
+    private var launcherSwitch: Switch? = null
+    private var syncingLauncher = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,6 +76,7 @@ class SettingsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        launcherSwitch?.let { syncLauncherSwitch(it) }
         // 使用须知还没同意时先不查状态，免得读屏读状态盖过须知
         if (page == HOME && Disclaimer.agreed(this)) send(ConfigSpec.CMD_STATUS)
     }
@@ -110,7 +113,7 @@ class SettingsActivity : Activity() {
             HOME -> home(root)
             INPUT -> {
                 addGroup(root, Group.INPUT)
-                root.addView(note("可切换抬手输入与标准输入"))
+                root.addView(note("可切换抬手输入、标准输入与全屏输入；全屏手势可在首页的“全屏与手势”中设置"))
                 root.addView(heading("延迟调整"))
                 addGroup(root, Group.HOLD)
                 root.addView(note("提示：停留在删除键可连续删除，空格键可开始语音；模块按抬手方式处理时，回车、发送键停留可触发豆包长按行为。标准输入的双击操作保持原样；改为豆包原生操作的键不使用模块停留时间"))
@@ -211,6 +214,10 @@ class SettingsActivity : Activity() {
     private fun advanced(root: LinearLayout) {
         addGroup(root, Group.MAIN)
 
+        root.addView(heading("桌面图标"))
+        root.addView(launcherToggle())
+        root.addView(note("关闭后隐藏桌面图标，仍可从 LSPosed 或 LSPatch 的模块设置打开；重新开启或恢复默认即可显示图标。桌面可能稍后才刷新"))
+
         root.addView(heading("问题反馈"))
         root.addView(note("遇到问题时：1. 打开“记录日志”；2. 回去重现一次问题；3. 回到这里点“复制日志”粘贴发给作者，日志很长就点“保存日志文件”，在 QQ 里把文件发给作者。"))
         addGroup(root, Group.LOG)
@@ -239,12 +246,21 @@ class SettingsActivity : Activity() {
         root.addView(button("全部恢复默认") {
             AlertDialog.Builder(this)
                 .setTitle("恢复默认")
-                .setMessage("确定要把全部设置恢复默认吗？自定义解释词不受影响。")
+                .setMessage("确定要把全部设置恢复默认吗？桌面图标会恢复显示，自定义解释词不受影响。")
                 .setPositiveButton("确定") { _, _ ->
+                    try {
+                        Shortcut.setShown(this, true)
+                    } catch (t: Throwable) {
+                        Toast.makeText(this, "桌面图标恢复失败，未恢复其他设置：${t.message ?: t.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                        launcherSwitch?.let { syncLauncherSwitch(it) }
+                        return@setPositiveButton
+                    }
                     val e = prefs.edit()
                     for (item in ConfigSpec.items) e.remove(item.key)
                     for (item in ConfigSpec.intItems) e.remove(item.key)
+                    for (item in ConfigSpec.strItems) e.remove(item.key)
                     e.apply()
+                    io.github.doubaoa11y.SpeechEngine.stop()
                     build()
                     send(ConfigSpec.CMD_RESET)
                     Toast.makeText(this, "已恢复默认", Toast.LENGTH_SHORT).show()
@@ -255,6 +271,41 @@ class SettingsActivity : Activity() {
     }
 
     // ---------------- 控件 ----------------
+
+    private fun syncLauncherSwitch(toggle: Switch): Boolean {
+        syncingLauncher = true
+        return try {
+            toggle.isChecked = Shortcut.shown(this)
+            toggle.isEnabled = true
+            true
+        } catch (t: Throwable) {
+            toggle.isEnabled = false
+            val msg = "无法读取桌面图标状态：${t.message ?: t.javaClass.simpleName}"
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+            false
+        } finally {
+            syncingLauncher = false
+        }
+    }
+
+    private fun launcherToggle(): Switch = Switch(this).apply {
+        text = "显示桌面图标"
+        setPadding(0, pad / 2, 0, pad / 2)
+        launcherSwitch = this
+        syncLauncherSwitch(this)
+        setOnCheckedChangeListener { _, checked ->
+            if (syncingLauncher) return@setOnCheckedChangeListener
+            val msg = try {
+                Shortcut.setShown(this@SettingsActivity, checked)
+                if (checked) "已显示桌面图标" else "已隐藏桌面图标，可从 LSPosed 或 LSPatch 的模块设置打开"
+            } catch (t: Throwable) {
+                "修改桌面图标失败：${t.message ?: t.javaClass.simpleName}"
+            }
+            syncLauncherSwitch(this)
+            Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+            announceForAccessibility(msg)
+        }
+    }
 
     /** 把一组的开关和选择项按定义顺序加进去：开关在前（下面一行是提示），选择项在后 */
     private fun addGroup(parent: LinearLayout, g: Group) {
