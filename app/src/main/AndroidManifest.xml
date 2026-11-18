@@ -27,7 +27,11 @@
             </intent-filter>
         </activity>
 
-        <provider android:name=".SettingsProvider" android:authorities="io.github.doubaoa11y.settings" android:exported="true" />
+        <provider
+            android:name=".SettingsProvider"
+            android:authorities="io.github.doubaoa11y.settings"
+            android:exported="true"
+            android:grantUriPermissions="true" />
 
         <!-- 只切换桌面入口；SettingsActivity 保留模块管理器的设置入口。 -->
         <activity-alias

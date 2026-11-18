@@ -42,6 +42,18 @@ object Names {
         return t
     }
 
+    /** 独立语音的可选整段标点读法，最长匹配现有映射，保留其他字符。 */
+    fun punctuationText(text: String): String {
+        val out = StringBuilder(text.length)
+        var i = 0
+        while (i < text.length) {
+            val pair = if (i + 1 < text.length) punct[text.substring(i, i + 2)] else null
+            if (pair != null) { out.append(pair); i += 2 }
+            else { out.append(punct[text[i].toString()] ?: text[i].toString()); i++ }
+        }
+        return out.toString()
+    }
+
     /**
      * 豆包工具栏按钮把内部标识写在 contentDescription 里（自己的代码也靠它找按钮，不能改），
      * 读屏读到的就是“btn_speech_bar_two”这样的字。这里只在无障碍节点上换成中文。

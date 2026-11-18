@@ -227,6 +227,10 @@ object TatansBridge {
             val full = FullscreenMode.windowRect()
             if (full != null && A11yState.recording && !readerPanelOpen()) {
                 want.set(full)
+                if (!VirtualKeys.keepFocus) {
+                    want.bottom = minOf(want.bottom, FullscreenMode.keyboardTopOnScreen())
+                    if (want.isEmpty) want.setEmpty()
+                }
             } else if (visible && Config.b("tatansFast") && A11yState.active && VirtualKeys.enabled && VirtualKeys.keepFocus && !readerPanelOpen()) {
                 val root = imeRoot()
                 val area = root?.let { r ->

@@ -31,17 +31,33 @@ object Candidates {
         private set
     private var listKey = ""
 
-    /** 正在打拼音、候选栏里有候选 */
-    val composing: Boolean get() = pinyin.isNotBlank() && current.any { it.isNotBlank() }
-
-    private var cursorMoved = false
-    fun hasCandidates(): Boolean = composing && !cursorMoved
+    private val origin = CandidateOriginState()
+    /** 必须属于当前输入会话；无拼音串仅凭手写/实际组字或按键+引擎证据兜底。 */
+    val composing: Boolean get() = origin.isOpen() && current.any { it.isNotBlank() }
+    fun hasCandidates(): Boolean = composing
     fun prev(): Boolean { if (!composing) return false; move(-1); return true }
     fun next(): Boolean { if (!composing) return false; move(1); return true }
     fun commit(): Boolean = composing && VirtualKeys.tapKeyNamed("空格")
-    fun markTyping() { cursorMoved = false }
-    fun onCursorMove() { cursorMoved = true }
+    fun markTyping() { Voice.onManualInput(); origin.input(CandidateOriginState.Input.KEY) }
+    fun markHandwriting() { Voice.onManualInput(); origin.input(CandidateOriginState.Input.HANDWRITING) }
+    fun onCursorMove() { origin.cursorMoved(); clearView("光标移动") }
     fun onDelete() { reset("删除候选") }
+    fun onExternalSelection(hasComposingRegion: Boolean) {
+        if (!hasComposingRegion && engineTyping() != true) onCursorMove()
+    }
+    private var queryFailureLogged = false
+    fun engineTyping(): Boolean? = try {
+        val j = JniHooks.jni()
+        if (j == null) null else de.robv.android.xposed.XposedHelpers.callMethod(j, "isTypingInput") as? Boolean
+    } catch (t: Throwable) {
+        if (!queryFailureLogged) { queryFailureLogged = true; L.hookError("Candidates.isTypingInput", t) }
+        null
+    }
+    fun onPinyinCleared() {
+        // 手写本来没有拼音串，空拼音通知不能当成取消手写候选。
+        if (pinyin.isBlank() && origin.fromHandwriting()) return
+        if (engineTyping() == false) reset("拼音栏已空")
+    }
 
     private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
 
@@ -98,10 +114,12 @@ object Candidates {
         val n = now + d
         if (d > 0 && n >= list.size && loadMore(list)) return
         if (n < 0 || n >= list.size || list[n].isBlank()) {
+            Sound.play("boundary")
             Speaker.speak("已到头，" + CharWords.candidate(list[now]))
             return
         }
         sel = n
+        Sound.play("scroll")
         L.i("候选切换到第${n + 1}个「${list[n]}」")
         Speaker.speak(CharWords.candidate(list[n]))
     }
@@ -171,11 +189,13 @@ object Candidates {
      * 上屏后还剩拼音的（只选了前半截），豆包会紧接着送新的候选栏，状态会再设回来。
      */
     fun install() {
-        InputHooks.onCommit { _, _ -> reset("上屏") }
+        InputHooks.onCommit { _, _ -> origin.committed(); clearView("上屏") }
         InputHooks.onComposing { text ->
             if (text.isBlank()) reset("拼音删空")
+            else if (!Voice.isRecording()) origin.input(CandidateOriginState.Input.COMPOSING)
         }
-        InputHooks.onFinishComposing { reset("结束组字") }
+        InputHooks.onFinishComposing { origin.committed(); clearView("结束组字") }
+        InputHooks.onDelete { onDelete() }
     }
 
     /** 工具栏恢复闲置。豆包在短信快捷输入等场景可能忽略切换，先核对引擎确实已退出组字。 */
@@ -185,13 +205,15 @@ object Candidates {
         try {
             val typing = de.robv.android.xposed.XposedHelpers.callMethod(j, "isTypingInput") as? Boolean ?: return
             L.i("工具栏恢复闲置：引擎组字=$typing")
-            if (!typing) reset("工具栏恢复，拼音已清空")
+            if (!typing && !origin.fromHandwriting()) reset("工具栏恢复，拼音已清空")
         } catch (t: Throwable) {
             L.hookError("Candidates.toolbarIdle", t)
         }
     }
 
-    fun reset(why: String) {
+    fun reset(why: String) { origin.clear(); clearView(why) }
+
+    private fun clearView(why: String) {
         if (pinyin.isNotEmpty() || current.isNotEmpty()) L.i("候选状态清空（$why）")
         current = emptyList()
         engineIdx = emptyList()
@@ -220,8 +242,8 @@ object Candidates {
         }
         // 删空时可能收到空数组或 null；也可能仅剩“手写找字”等非候选入口。
         // 必须同时撤掉翻页等待和延迟朗读，避免旧候选继续影响空格、标点。
-        if (py.isBlank() || list.none { it.isNotBlank() }) {
-            reset("候选栏已空")
+        if (!origin.snapshot(py.isNotBlank(), list.any { it.isNotBlank() }, engineTyping())) {
+            clearView("无当前输入会话的候选")
             return
         }
         (args.getOrNull(0) as? Long)?.let { snapId = it }
@@ -229,23 +251,18 @@ object Candidates {
         current = list
         engineIdx = eng
         pinyin = py
-        if (oldPy != py) cursorMoved = false
         val lk = py + "|" + list.joinToString("|")
         val waiting = loadingFrom
         if (lk != listKey) {
             listKey = lk
             sel = 0
             if (waiting != null) {
-                if (py == oldPy && py.isNotBlank()) afterLoad(waiting, list) else loadingFrom = null
+                if (py == oldPy && composing) afterLoad(waiting, list) else loadingFrom = null
             }
         }
         if (waiting != null && py == oldPy) return
         if (!VirtualKeys.enabled || !Config.b("speakCandidate")) return
         val first = list.firstOrNull { it.isNotBlank() } ?: return
-        if (py.isBlank()) {
-            last = ""
-            return
-        }
         val key = "$py|$first"
         if (key == last) return
         last = key

@@ -40,13 +40,6 @@ object InputHooks {
     private val finishListeners = ArrayList<() -> Unit>()
     private val deleteListeners = ArrayList<() -> Unit>()
 
-    /** 删除监听带内容：删掉的是哪个字（拿不到就是空串） */
-    private val deleteTextListeners = ArrayList<(String) -> Unit>()
-
-    fun onDeleteText(l: (String) -> Unit) {
-        deleteTextListeners.add(l)
-    }
-
     fun onComposing(l: (String) -> Unit) {
         composingListeners.add(l)
     }
@@ -96,6 +89,7 @@ object InputHooks {
         hook(c, "setComposingText", arrayOf(cs, I)) { a -> "组字 setComposingText 「${Fmt.esc(a[0]?.toString())}」" }
         hook(c, "finishComposingText", arrayOf()) { _ -> "结束组字 finishComposingText" }
         hook(c, "deleteSurroundingText", arrayOf(I, I)) { a -> "删除 deleteSurroundingText 前=${a[0]} 后=${a[1]}" }
+        hook(c, "deleteSurroundingTextInCodePoints", arrayOf(I, I)) { a -> "删除代码点 前=${a[0]} 后=${a[1]}" }
         hook(c, "sendKeyEvent", arrayOf(KeyEvent::class.java)) { a ->
             val e = a[0] as? KeyEvent
             "按键事件 sendKeyEvent ${if (e?.action == KeyEvent.ACTION_DOWN) "按下" else "抬起"} ${e?.let { KeyEvent.keyCodeToString(it.keyCode) }}"
@@ -104,6 +98,12 @@ object InputHooks {
         hook(c, "setSelection", arrayOf(I, I)) { a -> "选择 setSelection ${a[0]}-${a[1]}" }
         hook(c, "setComposingRegion", arrayOf(I, I)) { a -> "组字区域 setComposingRegion ${a[0]}-${a[1]}" }
     }
+
+    private val mutationDepth = ThreadLocal<MutableMap<String, Int>>()
+    private const val ENTERED = "doubao.echo.entered"
+    private const val ROOT = "doubao.echo.root"
+    private const val SNAPSHOT = "doubao.echo.snapshot"
+    private const val INTERCEPTED = "doubao.echo.intercepted"
 
     private val hookedMethods = Collections.synchronizedSet(HashSet<java.lang.reflect.Method>())
 
@@ -118,79 +118,63 @@ object InputHooks {
         if (!hookedMethods.add(m)) return
         Hooker.hookMember(m, SafeHook("IC.$name", before = { p ->
             if (!A11yState.recording) return@SafeHook
+            val depths = mutationDepth.get() ?: HashMap<String, Int>().also { mutationDepth.set(it) }
+            val depth = depths[name] ?: 0
+            depths[name] = depth + 1
+            p.setObjectExtra(ENTERED, true)
+            p.setObjectExtra(ROOT, depth == 0)
+            if (depth != 0) return@SafeHook
             if (Config.b("logJni")) L.i(msg(p.args) + " 来源=" + caller())
-            try {
-                if (name == "setComposingText") {
-                    val t = p.args[0]?.toString() ?: ""
-                    for (l in composingListeners) l(t)
-                }
-                if (name == "finishComposingText") for (l in finishListeners) l()
-                if (name == "deleteSurroundingText") {
-                    // 必须在原方法执行前把要删的字读出来（执行完就取不到了）
-                    val n = (p.args.getOrNull(0) as? Int) ?: 0
-                    val gone = deletedPreview(p.thisObject as? InputConnection, n, false)
-                    for (l in deleteListeners) l()
-                    if (gone.isNotEmpty()) for (l in deleteTextListeners) l(gone)
-                    noteDeleted()
-                }
-                if (name == "sendKeyEvent") {
-                    val e = p.args[0] as? KeyEvent
-                    if (e != null && e.action == KeyEvent.ACTION_DOWN &&
-                        (e.keyCode == KeyEvent.KEYCODE_DEL || e.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
-                    ) {
-                        val fwd = e.keyCode == KeyEvent.KEYCODE_FORWARD_DEL
-                        val gone = deletedPreview(p.thisObject as? InputConnection, 1, fwd)
-                        for (l in deleteListeners) l()
-                        if (gone.isNotEmpty()) for (l in deleteTextListeners) l(gone)
-                        noteDeleted()
-                    }
-                }
-            } catch (t: Throwable) {
-                L.hookError("IC.listeners", t)
+            val ic = p.thisObject as? InputConnection
+            if (ic != null && name in setOf("commitText", "setComposingText", "deleteSurroundingText", "deleteSurroundingTextInCodePoints", "sendKeyEvent")) {
+                p.setObjectExtra(SNAPSHOT, TypingEcho.snapshot(ic))
             }
-            // 语音输入时先不把识别中间结果写进编辑框，说完再一起上屏
             try {
-                val ic = p.thisObject as? InputConnection
                 if (ic != null && Voice.intercept(name, ic, p.args)) {
+                    p.setObjectExtra(INTERCEPTED, true)
                     p.result = true
-                    return@SafeHook
                 }
-            } catch (t: Throwable) {
-                L.hookError("Voice.intercept", t)
-            }
-            // 组字也是“编辑框里有内容”（拼音还没上屏、语音留着的中间结果写进去），
-            // 编辑选项不能因为“还没 commitText”就继续停在粘贴/收起键盘
-            if (name == "setComposingText") {
-                val t = p.args[0]?.toString() ?: ""
-                if (t.isNotBlank()) EditOptions.markTyped()
-            }
-            if (name == "commitText") {
-                val text = p.args[0]?.toString() ?: return@SafeHook
-                val src = caller()
-                // 上屏了字＝编辑框不再空：编辑选项立刻换成完整列表并停在“默认”，
-                // 不用跨进程去问（这一步每打一个字都会走，问一次太贵）
-                if (text.isNotBlank()) EditOptions.markTyped()
-                for (l in commitListeners) {
-                    try {
-                        l(text, src)
-                    } catch (t: Throwable) {
-                        L.hookError("onCommit", t)
+            } catch (t: Throwable) { L.hookError("Voice.intercept", t) }
+        }, after = { p ->
+            if (p.getObjectExtra(ENTERED) != true) return@SafeHook
+            val depths = mutationDepth.get()
+            val depth = ((depths?.get(name) ?: 1) - 1).coerceAtLeast(0)
+            if (depth == 0) depths?.remove(name) else depths?.set(name, depth)
+            if (depths?.isEmpty() == true) mutationDepth.remove()
+            if (p.getObjectExtra(ROOT) != true || p.getObjectExtra(INTERCEPTED) == true ||
+                p.throwable != null || p.result != true || !A11yState.recording) return@SafeHook
+            val ic = p.thisObject as? InputConnection ?: return@SafeHook
+            val text = p.args.firstOrNull() as? CharSequence
+            when (name) {
+                "setComposingText" -> {
+                    val value = text?.toString().orEmpty()
+                    for (listener in composingListeners) try { listener(value) } catch (t: Throwable) { L.hookError("IC.composing", t) }
+                    if (value.isNotBlank()) EditOptions.markTyped()
+                    TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
+                }
+                "commitText" -> {
+                    val value = text?.toString().orEmpty()
+                    if (value.isNotBlank()) EditOptions.markTyped()
+                    for (listener in commitListeners) try { listener(value, caller()) } catch (t: Throwable) { L.hookError("IC.commit", t) }
+                    TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
+                }
+                "finishComposingText" -> {
+                    for (listener in finishListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.finish", t) }
+                    TypingEcho.successful(ic, name, "", null)
+                }
+                "deleteSurroundingText", "deleteSurroundingTextInCodePoints", "sendKeyEvent" -> {
+                    val event = p.args.firstOrNull() as? KeyEvent
+                    val deleting = name != "sendKeyEvent" || (event?.action == KeyEvent.ACTION_DOWN &&
+                        event.keyCode in setOf(KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL))
+                    if (deleting) {
+                        for (listener in deleteListeners) try { listener() } catch (t: Throwable) { L.hookError("IC.delete", t) }
+                        noteDeleted()
+                        TypingEcho.deleted(ic, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
                     }
                 }
+                "setSelection" -> if (!Voice.isRecording() && Candidates.engineTyping() == false) Candidates.onCursorMove()
             }
         }))
-    }
-
-    /** 这次删除会删掉哪几个字（取不到返回空串，不影响删除本身） */
-    private fun deletedPreview(ic: InputConnection?, n: Int, forward: Boolean): String {
-        if (ic == null || n <= 0 || deleteTextListeners.isEmpty()) return ""
-        return try {
-            @Suppress("DEPRECATION")
-            val t = if (forward) ic.getTextAfterCursor(n.coerceAtMost(32), 0) else ic.getTextBeforeCursor(n.coerceAtMost(32), 0)
-            t?.toString()?.takeLast(n) ?: ""
-        } catch (_: Throwable) {
-            ""
-        }
     }
 
     /** 调用栈里豆包自己的前几层，用来区分键盘、手写、语音上屏 */

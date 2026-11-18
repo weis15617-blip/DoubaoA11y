@@ -64,7 +64,14 @@ class WordsPage(private val act: SettingsActivity) {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, 0)
         }
-        root.addView(act.heading(act.titleOf(SettingsActivity.WORDS), 22f))
+        fill(root, standalone = true)
+        act.setContentView(root)
+    }
+
+    fun fill(root: LinearLayout, standalone: Boolean = false) {
+        val pad = act.pad
+        root.addView(act.heading(act.titleOf(SettingsActivity.WORDS), if (standalone) 22f else 18f))
+        WordTransfer.fill(act, root)
 
         val bar = LinearLayout(act).apply { orientation = LinearLayout.HORIZONTAL }
         val input = EditText(act).apply {
@@ -113,7 +120,33 @@ class WordsPage(private val act: SettingsActivity) {
         val list = ListView(act)
         list.adapter = adapter
         list.setOnItemClickListener { _, _, pos, _ -> edit(shown[pos]) }
-        root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        if (standalone) {
+            root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        } else {
+            val h = (act.resources.displayMetrics.heightPixels * 0.72f).toInt().coerceAtLeast(pad * 20)
+            var lastY = 0f
+            list.setOnTouchListener { v, ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        lastY = ev.y
+                        v.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        val dy = ev.y - lastY
+                        val atTop = list.firstVisiblePosition == 0 && (list.getChildAt(0)?.top ?: 0) >= 0
+                        val atBottom = list.lastVisiblePosition >= shown.lastIndex &&
+                            (list.getChildAt(list.childCount - 1)?.bottom ?: 0) <= list.height
+                        if ((dy > 0 && atTop) || (dy < 0 && atBottom)) {
+                            v.parent?.requestDisallowInterceptTouchEvent(false)
+                        } else {
+                            v.parent?.requestDisallowInterceptTouchEvent(true)
+                        }
+                    }
+                }
+                false
+            }
+            root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h))
+        }
 
         fun doSearch() = filter(input.text.toString().trim(), onlyCustom.isChecked)
         search.setOnClickListener { doSearch() }
@@ -121,7 +154,6 @@ class WordsPage(private val act: SettingsActivity) {
             if (id == EditorInfo.IME_ACTION_SEARCH) { doSearch(); true } else false
         }
         onlyCustom.setOnCheckedChangeListener { _, _ -> doSearch() }
-        act.setContentView(root)
         filter("", false, speak = false)
     }
 

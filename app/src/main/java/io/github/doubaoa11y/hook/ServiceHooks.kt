@@ -17,6 +17,7 @@ object ServiceHooks {
 
     private var initialized = false
     private var appContext: Context? = null
+    private var editorIdentity: String? = null
 
     fun install(cl: ClassLoader) {
         val c = Hooker.findClass(CLS, cl) ?: return
@@ -30,10 +31,23 @@ object ServiceHooks {
                 appContext?.let { Config.pull(it) }
                 EditOptions.reset()
                 EditActions.onWindowHidden()
-                Candidates.reset("换输入框")
+                val identity = "${ei?.packageName}/${ei?.fieldId}/${ei?.inputType}"
+                if (editorIdentity != identity || p.args[1] != true) {
+                    Voice.onInputEnd()
+                    TypingEcho.reset()
+                    Candidates.reset("换输入框")
+                    editorIdentity = identity
+                }
                 FullscreenMode.refresh("换输入框")
                 L.i("onStartInputView 应用=${ei?.packageName} 输入类型=0x${Integer.toHexString(ei?.inputType ?: 0)} 回车动作=0x${Integer.toHexString(ei?.imeOptions ?: 0)} 重启=${p.args[1]}")
             }))
+        val integer = Int::class.javaPrimitiveType!!
+        Hooker.method(c, "onUpdateSelection", Array(6) { integer }, SafeHook("candidate.selection", after = { p ->
+            if (!A11yState.recording) return@SafeHook
+            val values = p.args.map { it as? Int ?: -1 }
+            if (values[0] != values[2] || values[1] != values[3])
+                Candidates.onExternalSelection(values[4] >= 0 && values[5] >= 0)
+        }))
         installHideHooks(cl)
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
             SafeHook("fullscreen.insets", after = { p -> FullscreenMode.onComputeInsets(p.args[0]) }))
@@ -52,6 +66,8 @@ object ServiceHooks {
             KeyboardState.onShown()
             TatansBridge.onShown()
             FullscreenMode.onWindowShown()
+            ModuleEntries.toolbar()
+            ReaderControl.shown()
             if (FullscreenMode.wanted) {
                 EditActions.onWindowShown()
                 EditOptions.onKeyboardShown()
@@ -63,6 +79,7 @@ object ServiceHooks {
         }))
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
             FullscreenMode.onWindowHidden()
+            ReaderControl.hidden()
             EditOptions.onKeyboardHidden()
             EditActions.onWindowHidden()
             Speaker.stop()
@@ -87,6 +104,7 @@ object ServiceHooks {
     private fun onHiding(from: String) {
         L.i("键盘开始收起（$from）")
         FullscreenMode.onWindowHidden()
+        ReaderControl.hidden()
         EditOptions.onKeyboardHidden()
         EditActions.onWindowHidden()
         Speaker.stop()
@@ -147,12 +165,15 @@ object ServiceHooks {
         LogStore.init(ctx)
         Speaker.init(ctx)
         Haptic.init(ctx)
+        ReaderControl.init(ctx)
+        Sound.init(ctx)
         A11yState.init(ctx)
         TatansBridge.init(ctx)
         A11yState.onChange { FullscreenMode.refresh("读屏状态变化") }
         val screen = object : BroadcastReceiver() {
             override fun onReceive(c: Context, i: Intent) {
                 if (i.action == Intent.ACTION_SCREEN_OFF) {
+                    ReaderControl.hidden()
                     FullscreenMode.shutdown(); EditOptions.onKeyboardHidden(); Speaker.stop()
                 }
             }
@@ -192,8 +213,13 @@ object ServiceHooks {
                     if (isOrderedBroadcast) {
                         resultCode = Activity.RESULT_OK
                         resultData = msg ?: if (cmd == null) "已保存" else shortStatus(ctx)
-                        // 豆包里正在运行的模块版本：设置页拿它和自己比，不一样就是更新后还没强行停止豆包
-                        setResultExtras(android.os.Bundle().apply { putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE); putBoolean("active", VirtualKeys.enabled) })
+                        // 豆包里正在运行的模块版本及在输入法内直接切换过的开关状态
+                        setResultExtras(android.os.Bundle().apply {
+                            putInt("moduleVersion", ConfigSpec.MODULE_VERSION_CODE)
+                            putBoolean("active", VirtualKeys.enabled)
+                            putBoolean("sync_upperOperation", Config.b("upperOperation"))
+                            putBoolean("sync_screenToolbar", Config.b("screenToolbar"))
+                        })
                         L.i("状态：${status(ctx)}")
                     }
                 } catch (t: Throwable) {
@@ -215,10 +241,23 @@ object ServiceHooks {
         val ex = intent.extras
         val cmd = intent.getStringExtra(ConfigSpec.EXTRA_CMD)
         val logWasOn = Config.b("runLog")
-        if (cmd == ConfigSpec.CMD_RESET) Config.reset()
+        if (cmd == ConfigSpec.CMD_RESET) {
+            Config.clearDirty("upperOperation")
+            Config.clearDirty("screenToolbar")
+            Config.reset()
+        }
         if (ex != null) {
             for (item in ConfigSpec.items) {
-                if (ex.containsKey(item.key)) Config.set(item.key, ex.getBoolean(item.key, item.default))
+                if (!ex.containsKey(item.key)) continue
+                if (item.key in setOf("upperOperation", "screenToolbar")) {
+                    if (cmd == ConfigSpec.CMD_STATUS && Config.isDirty(item.key)) {
+                        Config.setFromIme(appContext, item.key, Config.b(item.key))
+                        continue
+                    } else if (cmd != ConfigSpec.CMD_STATUS) {
+                        Config.clearDirty(item.key)
+                    }
+                }
+                Config.set(item.key, ex.getBoolean(item.key, item.default))
             }
             for (item in ConfigSpec.intItems) {
                 if (ex.containsKey(item.key)) Config.setInt(item.key, ex.getInt(item.key, item.default))
@@ -233,6 +272,8 @@ object ServiceHooks {
         TatansBridge.refresh("设置变化")
         A11yState.refresh("设置变化")
         FullscreenMode.refresh("设置变化")
+        ModuleEntries.toolbar()
+        Sound.onConfigChanged()
         if (!FullscreenMode.wanted) EditOptions.onKeyboardHidden()
         if (!A11yState.moduleOn || Config.b("speakByReader")) Speaker.stop()
         if (cmd == ConfigSpec.CMD_DUMP) {

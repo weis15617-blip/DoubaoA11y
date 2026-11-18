@@ -52,25 +52,25 @@ object NativeSettingsA11y {
     private val attached: MutableSet<View> =
         Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap()))
 
-    /** 模块总开关。设置页进程不走输入法的初始化，自己读一次；读不到按开着算 */
+    /** 设置页进程从模块 Provider 读取总开关；读取失败不改宿主界面。 */
     @Volatile
     private var moduleOn: Boolean? = null
 
     private fun on(ctx: Context?): Boolean {
         moduleOn?.let { return it }
         if (ctx != null) refreshModuleOn(ctx)
-        return moduleOn ?: true
+        return moduleOn ?: false
     }
 
     @Suppress("DEPRECATION")
     private fun refreshModuleOn(ctx: Context) {
         moduleOn = try {
-            // 设置是输入法进程写的，这里用多进程模式读，拿到最新值
-            ctx.getSharedPreferences(ConfigSpec.PREFS_NAME, Context.MODE_MULTI_PROCESS)
-                .getBoolean("moduleOn", true)
+            // 与模块设置页使用同一个数据源，避免 :Setting 进程的偏好缓存过期。
+            ctx.contentResolver.call(io.github.doubaoa11y.SettingsProvider.URI, "dump", null, null)
+                ?.getBoolean("moduleOn", true) ?: false
         } catch (t: Throwable) {
-            L.e("设置页读取模块总开关失败，按开着处理", t)
-            true
+            L.e("设置页读取模块总开关失败，跳过增强", t)
+            false
         }
     }
 
@@ -200,6 +200,7 @@ object NativeSettingsA11y {
                 // 每次进设置首页重读总开关：在模块设置里刚改过的，回到豆包设置就生效
                 refreshModuleOn(root.context)
                 if (moduleOn == false) return@SafeHook
+                root.post { if (on(root.context)) ModuleEntries.settings(root) }
                 for (name in OVERLAY_NAMES) findById(root, name)?.let { attachOverlayDelegate(it) }
             }))
     }

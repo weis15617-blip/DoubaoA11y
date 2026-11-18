@@ -6,7 +6,7 @@ import android.os.SystemClock
 import io.github.doubaoa11y.ConfigSpec
 
 /**
- * 全屏手势里的“编辑选项”。
+ * 全屏手势里的“编辑菜单”。
  *
  * 单指上滑 = 上一个选项，单指下滑 = 下一个选项，单指双击 = 执行当前这一项。
  *
@@ -121,7 +121,7 @@ object EditOptions {
         watching = true
         main.removeCallbacks(tick)
         main.postDelayed(tick, WATCH_EMPTY_MS)
-        L.i("编辑选项开始盯着编辑框（空=${empty}）")
+        L.i("编辑菜单开始盯着编辑框（空=${empty}）")
     }
 
     private fun stopWatch() {
@@ -129,7 +129,7 @@ object EditOptions {
         watching = false
         main.removeCallbacks(tick)
         emptyHits = 0
-        L.i("编辑选项停止盯着编辑框")
+        L.i("编辑菜单停止盯着编辑框")
     }
 
     /**
@@ -180,7 +180,7 @@ object EditOptions {
         // 变空：停在“粘贴”（第一步就能直接双击粘贴）；有字：停在“默认”（双击跳行首行尾）
         index = if (nowEmpty) 0 else baseIds.indexOf(ConfigSpec.ACT_DEFAULT).let { if (it < 0) 0 else it }
         navAt = 0L
-        L.i("编辑框${if (nowEmpty) "变空" else "有内容"}（$why），编辑选项：${ids.joinToString { ConfigSpec.actionName(it) }}")
+        L.i("编辑框${if (nowEmpty) "变空" else "有内容"}（$why），编辑菜单：${ids.joinToString { ConfigSpec.actionName(it) }}")
     }
 
     /** 刚打了字：一定是“有内容”，直接切到完整列表并回到默认项，不用跨进程问 */
@@ -218,7 +218,7 @@ object EditOptions {
     }
 
     /**
-     * 键盘区打了字：轮盘回到“双击跳转行首行尾”（编辑选项里的“默认”项）。
+     * 键盘区打了字：轮盘回到“双击跳转行首行尾”（编辑菜单里的“默认”项）。
      *
      * 用户打完字再双击，要的是跳行首/行尾，不是上一次上下滑浏览到的“粘贴”“清空文本”；
      * 全屏下打字时手指一直在键盘区，根本看不到轮盘停在哪，所以打完一按就该回到默认那一项。
@@ -230,7 +230,7 @@ object EditOptions {
         // 打了字编辑框就有内容了：列表切回完整那套，并停在“双击跳转行首行尾”
         empty = false
         backToDefault()
-        // 刚打过字，不算“刚切过编辑选项”，候选优先重新生效
+        // 刚打过字，不算“刚切过编辑菜单”，候选优先重新生效
         navAt = 0L
         if (wasDynamic) EditActions.leaveSelectionQuiet()
     }
@@ -252,6 +252,7 @@ object EditOptions {
     fun isFresh(): Boolean = navAt > 0 && SystemClock.uptimeMillis() - navAt < 2000
 
     fun next(): Boolean {
+        Sound.play("double")
         val n = ids.size
         if (n == 0) return false
         index = if (index + 1 >= n) 0 else index + 1
@@ -261,6 +262,7 @@ object EditOptions {
     }
 
     fun prev(): Boolean {
+        Sound.play("double")
         val n = ids.size
         if (n == 0) return false
         index = if (index <= 0) n - 1 else index - 1
@@ -276,7 +278,7 @@ object EditOptions {
         if (index >= n) index = 0
         val action = ids[index]
         navAt = SystemClock.uptimeMillis()
-        L.i("执行编辑选项：${ConfigSpec.dynamicName(action) ?: ConfigSpec.actionName(action)}")
+        L.i("执行编辑菜单：${ConfigSpec.dynamicName(action) ?: ConfigSpec.actionName(action)}")
         val ok = GestureMap.run(action)
         if (!ok) return false
         // 全选文本 / 选择文本：执行成功后进入选择态，动态项变成剪切/复制/删除文本/取消选择
@@ -308,9 +310,10 @@ object EditOptions {
         navAt = 0L
     }
 
-    private fun announce() {        Speaker.speak(currentName)
+    private fun announce() {
+        Speaker.speak(currentName)
     }
 
     /** 给“查询模块状态”用 */
-    fun describe(): String = "当前编辑选项：$currentName"
+    fun describe(): String = "当前编辑菜单：$currentName"
 }

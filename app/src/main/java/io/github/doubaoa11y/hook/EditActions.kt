@@ -81,12 +81,12 @@ object EditActions {
      * 键盘区（下半屏）按了删除键——全屏时摸到“删除”抬手、或者按住连续删除。
      *
      * 用户拿这个删掉选中的文本之后，编辑框里已经没有选区了，可选择态还挂着：
-     * 左右滑还在扩选、编辑选项轮盘还停在“剪切/复制/删除文本/取消选择”上，
+     * 左右滑还在扩选、编辑菜单轮盘还停在“剪切/复制/删除文本/取消选择”上，
      * 看着就像“没退出多选”（用户反馈）。这里等原生删除真的做完再核对一次。
      */
     fun onKeyDelete() {
         if (!selecting) {
-            // 不在选择态：打字用的删除，编辑选项轮盘照样回到“双击跳转行首行尾”
+            // 不在选择态：打字用的删除，编辑菜单轮盘照样回到“双击跳转行首行尾”
             EditOptions.keyTyped()
             return
         }
@@ -109,7 +109,7 @@ object EditActions {
     }
 
     /**
-     * 退出选择态的唯一入口：标志位、固定端、活动端、编辑选项轮盘一起收拾干净。
+     * 退出选择态的唯一入口：标志位、固定端、活动端、编辑菜单轮盘一起收拾干净。
      *
      * 之前散在各处手写 `selecting = false; anchor = -1`，漏掉过 activeEnd 和
      * EditOptions.selectionEnded()，于是出现“选择态退了、轮盘还停在剪切/复制/取消选择上”
@@ -196,20 +196,7 @@ object EditActions {
     // 与读屏、豆包原生编辑面板各走各的，天然不冲突、不错位。
 
     /** 默认的“句子结束”标点，和天坦输入法 SENTENCE_SYMBOL_DEFAULT 一致 */
-    private val defaultSentenceSymbols = setOf(".", ",", ";", "?", "!", "。", "，", "；", "？", "！", "\n")
-
-    /** 用户自定义的按句移动标点（读配置，空则用默认） */
-    private fun sentenceSymbols(): Set<String> {
-        val s = Config.s("sentenceSymbols").trim()
-        if (s.isEmpty()) return defaultSentenceSymbols
-        val out = LinkedHashSet<String>()
-        // 每行一个字符；也容忍用逗号/空格分隔
-        for (tok in s.replace('，', ',').replace(' ', ',').split(',', '\n')) {
-            val t = tok.trim()
-            if (t.isNotEmpty()) out.add(t)
-        }
-        return if (out.isEmpty()) defaultSentenceSymbols else out
-    }
+    private fun sentenceSymbols() = ConfigSpec.sentenceList(Config.s("sentenceSymbols")).toSet()
 
     private fun isSentenceSymbol(c: Char): Boolean = sentenceSymbols().contains(c.toString())
 
@@ -222,7 +209,7 @@ object EditActions {
     /**
      * 编辑框里现在一个字都没有。
      *
-     * 给编辑选项用（空框只显示“粘贴”“收起键盘”）。这是跨进程问编辑框，别在每次按键里调，
+     * 给编辑菜单用（空框只显示“粘贴”“收起键盘”）。这是跨进程问编辑框，别在每次按键里调，
      * 只在弹键盘、上屏、删除、粘贴这些节点调（见 [EditOptions.refresh]）。
      */
     fun editorEmpty(): Boolean {
@@ -444,6 +431,7 @@ object EditActions {
      * 换行读成停顿（`\n` → 逗号），`\r\n` 直接去掉，别让读屏念成“斜杠 n”或者直接吃掉。
      */
     private fun speakBoundary(dir: Int, s: Snapshot) {
+        Sound.play("boundary")
         val text = s.text
         val n = text.length
         if (n == 0) {
@@ -664,6 +652,7 @@ object EditActions {
 
         val next = boundaryOf(unit, s.text, rel, dir)
         if (next < 0) {
+            Sound.play("boundary")
             // 活动端到头了：报字数和边界，别只说“已到开头”就没了
             val n = kotlin.math.abs(active - a)
             Speaker.speak((if (dir < 0) "已选到开头，共" else "已选到末尾，共") + "${n}个字")
@@ -1116,7 +1105,7 @@ object EditActions {
         ic.performContextMenuAction(android.R.id.selectAll)
         ic.commitText("", 1)
         main.postDelayed({ Speaker.speak("已清空 $n 个字") }, 90)
-        // 清空了：编辑选项回到“粘贴 / 收起键盘”，默认停在粘贴
+        // 清空了：编辑菜单回到“粘贴 / 收起键盘”，默认停在粘贴
         main.postDelayed({ EditOptions.refresh("清空文本") }, 140)
     }
 
@@ -1297,7 +1286,7 @@ object EditActions {
                 Speaker.unmute()
                 Speaker.echo(if (!tail.isNullOrBlank()) "已粘贴 $tail" else "已粘贴")
                 L.i("粘贴成功：字数 ${before.length} → ${now.length}")
-                // 粘进来字以后编辑选项要换成完整那套（并从“粘贴”回到“双击跳行首行尾”）
+                // 粘进来字以后编辑菜单要换成完整那套（并从“粘贴”回到“双击跳行首行尾”）
                 EditOptions.refresh("粘贴成功")
                 return@postDelayed
             }

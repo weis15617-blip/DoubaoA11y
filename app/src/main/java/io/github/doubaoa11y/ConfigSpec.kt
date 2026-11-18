@@ -10,7 +10,7 @@ package io.github.doubaoa11y
 object ConfigSpec {
     /** 模块自己的版本（build.gradle.kts 从这里读） */
     const val MODULE_VERSION_CODE = 46
-    const val MODULE_VERSION_NAME = "1.2.0"
+    const val MODULE_VERSION_NAME = "2.0.0Beta"
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
@@ -54,11 +54,14 @@ object ConfigSpec {
     const val SETTINGS_PREFS = "settings"
 
     /** 设置页里的分组；FIXED 不显示，永远用默认值 */
-    enum class Group { MAIN, LOG, INPUT, HOLD, FAST, CANDIDATE, STATE, VIBRATE, VOICE, GESTURE, DEBUG, FIXED }
+    enum class Group { MAIN, LOG, INPUT, HOLD, FAST, CANDIDATE, STATE, VIBRATE, VOICE, GESTURE, INTERNAL, DEBUG, FIXED }
 
     class Item(val key: String, val label: String, val default: Boolean, val group: Group, val hint: String = "")
 
     val items = listOf(
+        Item("upperOperation", "上半屏手势", false, Group.GESTURE),
+        Item("screenToolbar", "工具栏显示上半屏手势", false, Group.INTERNAL),
+        Item("soundOn", "启用音效", false, Group.STATE),
         // 首页的总开关：关掉后模块什么都不做，豆包和没装模块一样
         Item("moduleOn", "模块总开关", true, Group.MAIN,
             "提示：这是整个模块的总开关，关闭后豆包输入法恢复官方原版方式，请谨慎关闭！"),
@@ -69,21 +72,21 @@ object ConfigSpec {
             "提示：默认把打的字和语音识别的文字换成星号。排查语音、候选的问题时，作者可能会请你打开"),
         // 快速输入（触摸直接到键盘时）
         Item("tatansFast", "快速输入", true, Group.FAST,
-            "提示：键盘响应更快，解说和天坦读屏原生支持，其他读屏需在关闭触摸浏览的情况下使用"),
+            "提示：键盘响应更快，但是读屏手势无法在键盘区域生效"),
         Item("nativeSpace", "空格键改为豆包原生操作", false, Group.FAST,
             "提示：豆包原生操作为：短按语音输入，空格上左右滑动可移动光标"),
         Item("nativeDelete", "删除键改为豆包原生操作", false, Group.FAST,
             "提示：豆包原生操作为：短按即可快速删除，按住左滑可以清空候选字"),
-        Item("nativeEnter", "回车键改为豆包原生操作", false, Group.FAST,
+        Item("nativeEnter", "回车键改为豆包原生操作", false, Group.FIXED,
             "提示：仅在快速输入或触摸浏览关闭、触摸直接到键盘时生效。打开后回车、发送键交给豆包处理，" +
                 "短按、长按和滑动行为以豆包设置为准；模块的回车键停留时间不再生效"),
         // 候选词解释
         Item("charExplain", "字词解释", true, Group.CANDIDATE),
-        Item("candidateNav", "逗号、句号切换候选", true, Group.CANDIDATE,
-            "提示：打拼音时逗号左移、句号右移候选，九键拼音上空格左边的 123 键左移、右边的中英切换键右移，空格上屏"),
+        Item("candidateNav", "按键切换候选", true, Group.CANDIDATE,
+            "提示：开启后可用空格左右侧的两个按键切换候选字，空格上屏"),
         // 键盘状态提示
-        Item("announceMode", "切换键盘类型、大小写状态时提示", false, Group.STATE),
-        Item("announceOnShow", "键盘弹出时朗读键盘类型", false, Group.STATE),
+        Item("announceMode", "切换键盘类型、大小写状态时提示", true, Group.STATE),
+        Item("announceOnShow", "键盘弹出时朗读键盘类型", true, Group.STATE),
         Item("announceHide", "键盘关闭时提示", true, Group.STATE),
         Item("voiceZoneHint", "语音输入操作提示", true, Group.STATE,
             "提示：长按空格时左上滑动取消输入，右上滑直接发送。"),
@@ -91,21 +94,23 @@ object ConfigSpec {
         Item("touchVibrate", "触摸震动", true, Group.VIBRATE),
         // 播报方式：和原来的“将所有播报内容交给屏幕阅读器”“开启语音”合并成一个开关
         Item("speakByReader", "使用屏幕阅读器播报", true, Group.VOICE,
-            "提示：打开时全部播报交给读屏；关闭后改用下面选择的语音库播报，不再走读屏"),
-        Item("ttsA11yStream", "语音库使用无障碍音量通道", false, Group.VOICE,
-            "提示：打开后语音库按“无障碍”用途播放（AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY），" +
-                "不需要在系统里开启无障碍服务；声音只受系统“无障碍音量”控制，媒体音量调到零也照样出声。" +
-                "听不到时请把系统音量里的无障碍音量调高"),
+            "提示：关闭后改用下面选择的语音库播报，走独立TTS"),
+        Item("ttsInputEcho", "独立语音库朗读上屏文字", false, Group.VOICE),
+        Item("ttsDeleteEcho", "独立语音库朗读删除结果", false, Group.VOICE),
+        Item("ttsVoiceEcho", "语音输入后朗读上屏文字", false, Group.VOICE),
+        Item("ttsPunctuationNames", "独立语音库逐项朗读标点名称", false, Group.VOICE,
+            "提示：把整段提示中的标点转成中文名称，例如逗号、省略号；读屏自身的标点设置不受影响"),
+        Item("ttsA11yStream", "语音库和音效使用无障碍音量通道", false, Group.VOICE, "提示：打开后语音走无障碍音量，关闭走媒体音量"),
         // 全屏手势（这些只影响全屏输入，半屏输入、标准输入一条都不读）
-        Item("fsHaptic", "执行手势时反馈", true, Group.GESTURE,
+        Item("fsHaptic", "执行手势时反馈", true, Group.FIXED,
             "提示：每做一个手势震一下，动作做不了时震两下并说明原因"),
         Item("fsDrag", "启用拖动手势", false, Group.GESTURE,
             "提示：按住不放往一个方向拖动，按设定的间隔反复执行这个方向的动作，适合连续移动光标、连续删字"),
         Item("fsSpeakAction", "执行手势后朗读结果", true, Group.GESTURE,
             "提示：关掉后手势照做，只是不读“已删除”“行尾”这类结果提示"),
         Item("fsSpeakChar", "移动光标时朗读字词", true, Group.GESTURE,
-            "提示：播报交给读屏时，光标移动读到的字由读屏自己念，模块不再重复（解决解说播报两次）；关掉后连字词也不念。到头、到尾的提示和字数始终会播报"),
-        Item("fsCandidateFirst", "有候选时优先操作候选", true, Group.GESTURE,
+            "提示：开启后移动光标会朗读字词，如遇到与读屏重复朗读时请关闭"),
+        Item("fsCandidateFirst", "有候选时优先操作候选", true, Group.FIXED,
             "提示：正在打拼音、候选栏里有候选时，单击或双击上屏候选，左右滑动切换候选；关掉后按下面每个手势配的动作执行"),
         // 调试
         Item("logDraw", "记录文字绘制", false, Group.DEBUG),
@@ -265,11 +270,11 @@ object ConfigSpec {
     const val ACT_DOC_START = 42
     const val ACT_DOC_END = 43
 
-    // 编辑选项：上滑上一个选项、下滑下一个选项、双击执行当前选项
+    // 编辑菜单：上滑上一个选项、下滑下一个选项、双击执行当前选项
     const val ACT_PREV_OPTION = 44
     const val ACT_NEXT_OPTION = 45
     const val ACT_RUN_OPTION = 46
-    // 双击跳行首/行尾（编辑选项里的“默认”项）
+    // 双击跳行首/行尾（编辑菜单里的“默认”项）
     const val ACT_DEFAULT = 47
     // 暂时关闭全屏模式（不收起键盘，切到半屏；下次输入法展开自动恢复全屏）
     const val ACT_TOGGLE_FULLSCREEN = 48
@@ -281,7 +286,7 @@ object ConfigSpec {
     /**
      * 动作表：id 到名字。设置页和豆包进程都用这一份。
      *
-     * 只放能在设置里选、能出现在编辑选项轮盘里的动作。
+     * 只放能在设置里选、能出现在编辑菜单轮盘里的动作。
      * 下面这些动作后端还实现着、但不在列表里（按需求拿掉）：
      * 上屏候选词、清空候选栏、回车换行、返回、输入提示、打开菜单、剪贴板、常用语、编辑面板、
      * 符号键盘、英文键盘、中文键盘、数字键盘；剪切/复制/取消选择是“动态项”，只在全选后出现。
@@ -316,21 +321,21 @@ object ConfigSpec {
         ACT_READ_SELECTION to "朗读选中文字",
         ACT_CHAR_COUNT to "字符统计",
         ACT_VOICE to "语音输入",
-        ACT_PREV_OPTION to "上一个编辑选项",
-        ACT_NEXT_OPTION to "下一个编辑选项",
-        ACT_RUN_OPTION to "执行当前编辑选项",
+        ACT_PREV_OPTION to "上一个编辑菜单",
+        ACT_NEXT_OPTION to "下一个编辑菜单",
+        ACT_RUN_OPTION to "执行当前编辑菜单",
         ACT_DEFAULT to "双击跳转行首行尾",
     )
 
     fun actionName(id: Int): String = ACTIONS.firstOrNull { it.first == id }?.second ?: "未指定"
 
     /**
-     * 编辑选项的出厂默认（只是初始值，用户可以在设置里自由增删排序）。
+     * 编辑菜单的出厂默认（只是初始值，用户可以在设置里自由增删排序）。
      *
      * - 默认（双击跳行首行尾）排第一，刚弹出键盘停在它上面，双击就跳行首/行尾；
      * - 全选文本、选择文本是“父项”：执行之后才冒出剪切、复制、取消选择；
      * - 粘贴、收起键盘；
-     * - 其余动作不默认出现，用户在“自定义编辑选项”里自己加。
+     * - 其余动作不默认出现，用户在“自定义编辑菜单”里自己加。
      */
     val EDIT_OPTIONS: List<Pair<String, Int>> = listOf(
         "默认" to ACT_DEFAULT,
@@ -363,18 +368,19 @@ object ConfigSpec {
     /** 动态项的名字（剪切/复制/取消选择这些不在 ACTIONS 里，单独查） */
     fun dynamicName(id: Int): String? = EDIT_OPTIONS_DYNAMIC.firstOrNull { it.second == id }?.first
 
-    /** 编辑选项列表存在这个键里：逗号分开的动作编号，空 = 用出厂默认 */
+    /** 编辑菜单列表存在这个键里：逗号分开的动作编号，空 = 用出厂默认 */
     const val EDIT_OPTIONS_KEY = "editOptions"
 
-    /** 默认的编辑选项（只有动作编号） */
+    /** 默认的编辑菜单（只有动作编号） */
     val DEFAULT_EDIT_OPTION_IDS: List<Int> = EDIT_OPTIONS.map { it.second }
 
     /**
-     * 读一份完整的编辑选项列表：空或写坏了一律回出厂默认。
+     * 读一份完整的编辑菜单列表：空或写坏了一律回出厂默认。
      * 动态项里“只能动态出现”的（剪切/复制/取消选择）不能手动加，解析时过滤掉；
      * “删除文本”复用“删除”动作，是合法基础项，不过滤。
      */
     fun parseEditOptions(s: String?): List<Int> {
+        if (s == "[]") return emptyList()
         if (s.isNullOrBlank()) return DEFAULT_EDIT_OPTION_IDS
         val known = ACTIONS.map { it.first }.toSet()
         val out = s.split(',').mapNotNull { it.trim().toIntOrNull() }
@@ -383,7 +389,7 @@ object ConfigSpec {
         return if (out.isEmpty()) DEFAULT_EDIT_OPTION_IDS else out
     }
 
-    fun encodeEditOptions(ids: List<Int>): String = ids.joinToString(",")
+    fun encodeEditOptions(ids: List<Int>): String = if (ids.isEmpty()) "[]" else ids.joinToString(",")
 
     /** “添加一项”能选的动作：去掉“未指定”、轮盘自身动作和只能动态出现的（剪切/复制/取消选择） */
     val EDIT_OPTION_CHOICES: List<Pair<Int, String>> = ACTIONS.filter {
@@ -396,8 +402,8 @@ object ConfigSpec {
      * 出厂默认手势：
      *
      * - 单指单击 = 朗读编辑框文字
-     * - 单指双击 = 执行当前编辑选项（默认停在“默认”项，双击就跳行首/行尾）
-     * - 单指上滑 = 上一个编辑选项、下滑 = 下一个编辑选项
+     * - 单指双击 = 执行当前编辑菜单（默认停在“默认”项，双击就跳行首/行尾）
+     * - 单指上滑 = 上一个编辑菜单、下滑 = 下一个编辑菜单
      * - 单指左滑 / 右滑 = 上一个 / 下一个字符或候选词
      * - 双指双击 = 语音输入
      * - 双指上下左右滑、八个拖动 = 未指定（不塞“上一句/下一句”这类提示动作）
@@ -424,12 +430,12 @@ object ConfigSpec {
         G_DRAG2_DOWN to ACT_NONE,
     )
 
-    /** 默认映射改版号：3 = 编辑选项收敛为“默认+全选/选择/粘贴/收起”，双击跳行首行尾，去掉上一句下一句 */
+    /** 默认映射改版号：3 = 编辑菜单收敛为“默认+全选/选择/粘贴/收起”，双击跳行首行尾，去掉上一句下一句 */
     const val GESTURE_DEFAULTS_VERSION = 3
     const val GESTURE_DEFAULTS_KEY = "gestureDefaultsVersion"
 
     /**
-     * 编辑选项改版号：
+     * 编辑菜单改版号：
      * - 2 = 改成“存完整列表”（不再区分固定项和额外项，用户可自由增删排序）；
      * - 3 = 2.0.0 清掉老默认列表里那一串“上一句/下一句/上一段/下一段/光标跳到行首…”。
      *   用户反馈这些选项上下滑时会一直念方向名，属于多余提示，作用也和左右滑、跳过重复，
@@ -447,11 +453,27 @@ object ConfigSpec {
     }
 
     /**
-     * 编辑选项从“只存额外勾选项”（1.1.13）改成“存完整列表”后，旧串里只有用户额外勾的几项，
+     * 编辑菜单从“只存额外勾选项”（1.1.13）改成“存完整列表”后，旧串里只有用户额外勾的几项，
      * 直接当完整列表读会丢掉出厂默认项。这里把旧串清掉，回到出厂默认列表，用户再自己增删排序。
      */
     fun migrateEditOptions(prefs: android.content.SharedPreferences) {
         if (!prefs.contains(EDIT_OPTIONS_KEY)) prefs.edit().putString(EDIT_OPTIONS_KEY, encodeEditOptions(DEFAULT_EDIT_OPTION_IDS)).apply()
+    }
+
+    fun sentenceList(value: String?): List<String> {
+        if (value.isNullOrBlank()) return ".,;?!。，；？！\n".map { it.toString() }
+        if (value.startsWith("list:")) return value.removePrefix("list:").map { it.toString() }.distinct()
+        return value.split(',', '，', ' ', '\n').filter { it.isNotBlank() }.distinct()
+    }
+
+    fun migrateInput(prefs: android.content.SharedPreferences) {
+        val editor = prefs.edit()
+        if (prefs.getInt("typeMode", TYPE_LIFT) == TYPE_FULLSCREEN) {
+            editor.putInt("typeMode", TYPE_LIFT).putBoolean("upperOperation", true)
+            if (!prefs.contains("screenToolbar")) editor.putBoolean("screenToolbar", true)
+        }
+        if (prefs.getInt("fsDragMs", 300) == 150) editor.putInt("fsDragMs", 200)
+        editor.apply()
     }
 
     fun gestureDefault(slot: Int): Int = gestureDefaults[slot] ?: ACT_NONE
@@ -460,9 +482,17 @@ object ConfigSpec {
     private val percentOptions = (5..20).map { it * 10 to if (it == 10) "语音库默认" else "${it / 10}.${it % 10} 倍" }
     private val volumeOptions = (0..20).map { it * 5 to "${it * 5}%" }
 
+    private val soundChoices = listOf(0 to "按键音", 1 to "边界或失败音", 2 to "手势音", 3 to "双击音", 4 to "翻页音", 5 to "语音开始音")
     val intItems = listOf(
+        IntItem("sfxKey", "按键音效", 0, soundChoices, Group.STATE),
+        IntItem("sfxFail", "错误音效", 1, soundChoices, Group.STATE),
+        IntItem("sfxGesture", "手势音效", 2, soundChoices, Group.STATE),
+        IntItem("sfxDouble", "双击音效", 3, soundChoices, Group.STATE),
+        IntItem("sfxScroll", "键盘切换音效", 4, soundChoices, Group.STATE),
+        IntItem("sfxVoice", "语音输入音效", 5, soundChoices, Group.STATE),
+        IntItem("soundVolume", "音效音量", 50, (0..10).map { it * 10 to "${it * 10}%" }, Group.STATE),
         IntItem("typeMode", "输入方式", TYPE_LIFT, listOf(
-            TYPE_LIFT to "抬手输入（半屏）", TYPE_DOUBLE_TAP to "标准输入", TYPE_FULLSCREEN to "全屏输入",
+            TYPE_LIFT to "抬手输入", TYPE_DOUBLE_TAP to "标准输入",
         ), Group.INPUT),
         IntItem("deleteHoldMs", "删除键停留时间", 1500, holdOptions, Group.HOLD),
         IntItem("spaceHoldMs", "空格键停留时间", 1000, holdOptions, Group.HOLD),
@@ -473,31 +503,30 @@ object ConfigSpec {
         IntItem("vibrateStrength", "震动强度", 2, listOf(1 to "轻", 2 to "中", 3 to "强"), Group.VIBRATE),
         // 手势灵敏度：滑动判定距离和双击窗口一起缩放（低=防误触，中=现在的手感，极速=轻轻一划就认）
         IntItem("gestureSensitivity", "手势灵敏度", 1, listOf(
-            0 to "低（防误触）", 1 to "中（默认）", 2 to "极速",
+            0 to "1（低）", 1 to "2（中）", 2 to "3（高）",
         ), Group.GESTURE),
         // 拖动时反复执行的间隔
-        IntItem("fsDragMs", "拖动重复间隔", 300, listOf(
-            150 to "0.15 秒", 200 to "0.2 秒", 300 to "0.3 秒", 500 to "0.5 秒", 800 to "0.8 秒",
-        ), Group.GESTURE),
+        IntItem("fsDragMs", "拖动重复间隔", 300, (1..8).map { it * 100 to "0.$it 秒" }, Group.GESTURE),
         // 语音库参数
         IntItem("ttsRate", "语速", 100, percentOptions, Group.VOICE),
         IntItem("ttsPitch", "语调", 100, percentOptions, Group.VOICE),
         IntItem("ttsVolume", "音量", 100, volumeOptions, Group.VOICE),
     ) + GESTURE_SLOTS.map { (slot, name) ->
-        IntItem(gestureKey(slot), "手势：$name", gestureDefault(slot), ACTIONS, Group.GESTURE)
+        IntItem(gestureKey(slot), "$name", gestureDefault(slot), ACTIONS, Group.GESTURE)
     }
 
     val intDefaults: Map<String, Int> = intItems.associate { it.key to it.default }
 
     val strItems = listOf(
         // 空字符串 = 跟随系统默认语音库
+        StrItem("soundNames", "音效名称", "{}", Group.INTERNAL),
         StrItem("ttsEngine", "语音库", "", Group.VOICE),
         StrItem("ttsVoice", "发音人", "", Group.VOICE),
-        // 编辑选项的完整列表（上下滑切换的顺序），逗号分开的动作编号；空 = 用出厂默认
-        StrItem(EDIT_OPTIONS_KEY, "编辑选项", "", Group.GESTURE),
+        // 编辑菜单的完整列表（上下滑切换的顺序），逗号分开的动作编号；空 = 用出厂默认
+        StrItem(EDIT_OPTIONS_KEY, "编辑菜单", "", Group.GESTURE),
         // 按句移动的标点（自定义），逗号或换行分开；空 = 用默认（。，；？！.!? 和换行）
-        StrItem("sentenceSymbols", "按句移动标点", "", Group.GESTURE),
-    )
+        StrItem("sentenceSymbols", "按句移动光标", "", Group.GESTURE),
+    ) + intItems.filter { it.key.startsWith("sfx") }.map { StrItem(it.key + "Id", it.label, "", Group.INTERNAL) }
 
     val strDefaults: Map<String, String> = strItems.associate { it.key to it.default }
 }

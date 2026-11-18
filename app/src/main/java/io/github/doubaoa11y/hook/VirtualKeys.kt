@@ -46,7 +46,7 @@ object VirtualKeys {
      * 全屏输入时，触摸浏览是不是已经不在中间挡着了（被模块关掉、或者本来就没开）。
      * 全屏模式下键盘区一律由模块自己摸键读键，不看这个值，只有“是不是该让路给读屏面板”才用它。
      */
-    private val fullscreenExplore: Boolean get() = Config.fullscreen && FullscreenMode.active && A11yState.recording
+    private val fullscreenExplore: Boolean get() = keepFocus && Config.fullscreen && FullscreenMode.active && A11yState.recording
 
     /**
      * 模块要不要接管键盘。
@@ -129,8 +129,8 @@ object VirtualKeys {
             val info = AccessibilityNodeInfo.obtain(host)
             host.onInitializeAccessibilityNodeInfo(info)
             val ks = refreshKeys(host)
-            if (liftFor(host)) {
-                // 讯飞式：键盘对读屏不可见，焦点留在编辑框（工具栏上方的翻译栏除外）
+            if (liftFor(host) || CustomToolbar.editing() || EditPanel.isOpen) {
+                // 讯飞式或被定制工具栏/编辑面板盖住：键盘对读屏不可见，焦点不落进底层按键
                 info.contentDescription = null
                 info.isVisibleToUser = false
                 info.removeAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS)
@@ -189,6 +189,7 @@ object VirtualKeys {
             return when (action) {
                 AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS -> {
                     if (s.focused == id) return false
+                    Sound.play("key")
                     val old = s.focused
                     s.focused = id
                     if (old != HOST) sendKeyEvent(host, old, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED)
@@ -321,7 +322,7 @@ object VirtualKeys {
 
     /** 键盘视图上的悬停。返回 true 表示已处理，豆包原来的悬停逻辑不再执行 */
     fun onHover(v: View, ev: MotionEvent): Boolean? {
-        if (!enabled) return null
+        if (!enabled || CustomToolbar.editing()) return null
         // 讯飞式下只有工具栏上方的翻译栏走这里（报虚拟按键给读屏），其余由根视图的摸读处理
         val focusHost = keepFocus && isFocusHost(v)
         if (keepFocus && !focusHost) return null
@@ -343,7 +344,9 @@ object VirtualKeys {
                     cancelHold()
                     if (old != HOST && !lift) sendKeyEvent(v, old, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
                     if (id != HOST) {
-                        Haptic.tick()                        speakKey(v, s, id)
+                        Haptic.tick()
+                        Sound.play("key")
+                        speakKey(v, s, id)
                         if (!focusHost) scheduleHold(v, s.keys[id])
                     }
                 }
@@ -468,7 +471,9 @@ object VirtualKeys {
                 current = t
                 lastAnnounce = SystemClock.uptimeMillis()
                 if (EditPanel.isOpen) L.i("编辑面板打开时摸到「${t.name}」${if (t.key != null) "（键盘键）" else t.view?.javaClass?.simpleName ?: ""}")
-                Haptic.tick()                Speaker.speak(t.name)
+                Haptic.tick()
+                Sound.play(if (t.view?.javaClass?.simpleName?.contains("Candidate") == true) "scroll" else "key")
+                Speaker.speak(t.name)
                 if (t.key != null && t.kb != null) scheduleHold(t.kb, t.key)
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
@@ -559,7 +564,7 @@ object VirtualKeys {
      * 16dp 比键行距的一半小，不会跨行配错；更远的地方照旧不出声。
      */
     private fun fallbackTarget(root: View, rx: Float, ry: Float): Target? {
-        if (EditPanel.isOpen) return null
+        if (EditPanel.isOpen || CustomToolbar.editing()) return null
         val radius = FALLBACK_RADIUS_DP * root.resources.displayMetrics.density
         val quarter = root.width.toLong() * root.height / 4
         var best: Target? = null
@@ -665,7 +670,7 @@ object VirtualKeys {
         if (v.visibility != View.VISIBLE || v.alpha <= 0f) return null
         if (!contains(v, rx, ry)) return null
         if (KeyboardViewHooks.kbClass?.isInstance(v) == true) {
-            if (!v.isShown || hwSeen || EditPanel.isOpen) return null
+            if (!v.isShown || hwSeen || EditPanel.isOpen || CustomToolbar.editing()) return null
             val loc = IntArray(2)
             v.getLocationOnScreen(loc)
             val slop = 12f * v.resources.displayMetrics.density
@@ -968,16 +973,21 @@ object VirtualKeys {
             if (name == "删除") EditActions.onKeyDelete() else EditOptions.keyTyped()
         }
         // 打拼音时逗号、句号切换候选，空格上屏选中的候选
-        if (Candidates.onKey(k)) {            return
+        if (Candidates.onKey(k)) {
+            Sound.play("double")
+            return
         }
         // 删除键：候选栏要变了，旧的候选状态先作废，免得左右滑还能读到删掉的候选
         if (name == "删除") {
-            Candidates.onDelete()            press(v, k, 40)
+            Candidates.onDelete()
+            Sound.play("key")
+            press(v, k, 40)
             return
         }
         // 打字：候选栏里接下来弹的候选归“打字”，全屏上半屏的左右滑才去动候选栏。
         // 移动光标之后弹的联想候选不算（见 Candidates.fromTyping），免得编辑文字时左右滑被吃掉。
-        Candidates.markTyping()
+        if ((name.length == 1 && name[0].isLetterOrDigit()) || name.matches(Regex("[A-Za-z]{2,4}"))) Candidates.markTyping()
+        else if (name in setOf("重写", "返回", "回车", "发送", "收起键盘")) Candidates.reset("非输入键")
         // 按键音在手指摸到这个键的时候已经响过了（key_pressed，和参考实现一致），
         // 抬手输入时不再补一声，不然一次按键响两下
         press(v, k, 40)
@@ -1063,6 +1073,7 @@ object VirtualKeys {
             downInScroller = inHorizontalScroller(root, ev.x + loc[0], ev.y + loc[1])
             val t = targetAt(root, ev.x + loc[0], ev.y + loc[1])
             if (inHandwrite && !downInScroller) {
+                Candidates.markHandwriting()
                 passThrough = true
                 cancelHold()
                 current = null

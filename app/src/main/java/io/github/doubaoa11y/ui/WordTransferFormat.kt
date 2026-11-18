@@ -1,0 +1,85 @@
+package io.github.doubaoa11y.ui
+
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+
+/** 原词条格式：单字 TAB 解释词。纯格式层，不读取词库、偏好或读屏数据。 */
+object WordTransferFormat {
+    const val MAX_BYTES = 1024 * 1024
+    const val MAX_CHARS = 200000
+    private const val BOM = "\uFEFF"
+
+    fun read(input: InputStream): Map<Char, String> {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            require(out.size() + n <= MAX_BYTES) { "解释词文件超过 1 MB" }
+            out.write(buffer, 0, n)
+        }
+        return parse(out.toByteArray())
+    }
+
+    fun parse(bytes: ByteArray): Map<Char, String> {
+        require(bytes.size <= MAX_BYTES) { "解释词文件超过 1 MB" }
+        val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix(BOM)
+        require(text.length <= MAX_CHARS) { "解释词内容超过 200000 字符" }
+        val result = LinkedHashMap<Char, String>()
+        if (text.isEmpty()) return result
+        val lines = text.split('\n')
+        for ((i, raw) in lines.withIndex()) {
+            if (i == lines.lastIndex && raw.isEmpty()) continue
+            val line = raw.removeSuffix("\r")
+            require(line.length >= 3 && line[1] == '\t') { "第 ${i + 1} 行应为单字、制表符、解释词" }
+            validate(line[0], line.substring(2), i + 1)
+            require(!result.containsKey(line[0])) { "第 ${i + 1} 行的字重复" }
+            result[line[0]] = line.substring(2)
+        }
+        return result
+    }
+
+    /** 偏好继续使用原来的无 BOM、LF 分隔格式；导出文件单独添加 UTF-8 BOM。 */
+    fun serialize(words: Map<Char, String>): String {
+        for ((c, value) in words) validate(c, value, null)
+        val text = words.entries.joinToString("\n") { "${it.key}\t${it.value}" }
+        require(text.length <= MAX_CHARS) { "解释词内容超过 200000 字符" }
+        require((BOM + text).toByteArray(Charsets.UTF_8).size <= MAX_BYTES) { "解释词文件超过 1 MB" }
+        return text
+    }
+
+    fun encode(words: Map<Char, String>): ByteArray = (BOM + serialize(words)).toByteArray(Charsets.UTF_8)
+
+    data class Change(val text: String, val total: Int, val overwritten: Int, val removed: Int)
+
+    fun plan(current: Map<Char, String>, imported: Map<Char, String>, replace: Boolean): Change {
+        val out = LinkedHashMap<Char, String>()
+        if (!replace) out.putAll(current)
+        out.putAll(imported)
+        return Change(serialize(out), out.size, imported.keys.count { it in current },
+            if (replace) current.keys.count { it !in imported } else 0)
+    }
+
+    private fun validate(c: Char, value: String, line: Int?) {
+        val prefix = if (line == null) "解释词条目" else "第 $line 行"
+        require(c in '一'..'鿿') { "$prefix 必须使用一个汉字（与原词库范围一致）" }
+        require(value.length in 1..256 && value.isNotBlank()) { "$prefix 的解释词须为 1 到 256 个字符且非空白" }
+        var i = 0
+        while (i < value.length) {
+            val ch = value[i]
+            if (Character.isHighSurrogate(ch)) {
+                require(i + 1 < value.length && Character.isLowSurrogate(value[i + 1])) { "$prefix 含无效字符" }
+                i += 2
+                continue
+            }
+            require(!Character.isLowSurrogate(ch) && !Character.isISOControl(ch) &&
+                Character.getType(ch) !in setOf(Character.FORMAT.toInt(), Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt())) {
+                "$prefix 的解释词不能含制表符、换行或控制符"
+            }
+            i++
+        }
+    }
+}

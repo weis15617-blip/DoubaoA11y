@@ -26,16 +26,19 @@ object Voice {
     private var sessionUntil = 0L
     private var lastComposing = ""
     private var spoken = false
+    private val echoGate = VoiceEchoGate()
+    private var echoToken = 0L
+    private var confirmedWritten = ""
+    private var expectedFinalCommit: String? = null
 
 
     fun install() {
-        Hooker.byName(AudioRecord::class.java, "startRecording", SafeHook("AudioRecord.startRecording", before = { _ ->
-            onStart()
+        Hooker.byName(AudioRecord::class.java, "startRecording", SafeHook("AudioRecord.startRecording", after = { p ->
+            if (p.throwable == null && (p.thisObject as? AudioRecord)?.recordingState == AudioRecord.RECORDSTATE_RECORDING) onStart()
         }))
-        Hooker.method(AudioRecord::class.java, "stop", arrayOf(), SafeHook("AudioRecord.stop", after = { _ ->
-            onStop()
+        Hooker.method(AudioRecord::class.java, "stop", arrayOf(), SafeHook("AudioRecord.stop", after = { p ->
+            if (p.throwable == null) onStop()
         }))
-        InputHooks.onCommit { text, _ -> onCommit(text) }
         InputHooks.onComposing { text -> onComposing(text) }
         InputHooks.onFinishComposing { onFinish() }
     }
@@ -148,6 +151,9 @@ object Voice {
     fun discard() {
         if (held != null) L.i("撤回输入，丢掉「$held」")
         held = null
+        confirmedWritten = ""
+        expectedFinalCommit = null
+        echoGate.cancel()
         lastComposing = ""
         spoken = true
         dropUntil = if (buffering) SystemClock.uptimeMillis() + 1500 else 0L
@@ -157,14 +163,48 @@ object Voice {
 
     /** 键盘收起、换输入框：把留着的写进去 */
     fun onInputEnd() {
-        if (!buffering) return
-        flush("收起")
-        end("收起")
+        if (buffering) { flush("收起"); end("收起") }
+        expectedFinalCommit = null
+        confirmedWritten = ""
+        echoGate.cancel()
+        sessionUntil = 0L
+        TypingEcho.reset()
+    }
+
+    /** 新的手动输入结束上一录音的回声事务，避免同一句正常再输入被吞。 */
+    fun onManualInput() {
+        if (recording) return
+        if (buffering) { flush("手动输入"); end("手动输入") }
+        expectedFinalCommit = null
+        confirmedWritten = ""
+        sessionUntil = 0L
+    }
+
+    /** 仅供成功回调并确认正文变化的统一回声路径调用。 */
+    fun acceptSuccessfulWrite(text: String, commit: Boolean): Boolean {
+        val expected = commit && expectedFinalCommit == text
+        if (!inSession() && !flushing && !expected) return false
+        if (expected) expectedFinalCommit = null
+        confirmedWritten = text
+        if (!recording) {
+            if (!commit) expectedFinalCommit = text
+            speakFinal("确认写入")
+        }
+        return true
+    }
+
+    /** 同一语音先组字再 commit 不改变正文，只消费预期收尾，不再补读。 */
+    fun acceptConfirmedCommit(text: String) {
+        if (expectedFinalCommit == text) expectedFinalCommit = null
     }
 
     private fun onStart() {
         if (recording) return
+        Sound.play("voice")
         recording = true
+        echoToken = echoGate.begin()
+        confirmedWritten = ""
+        expectedFinalCommit = null
         dropUntil = 0L
         // 上一次（比如撤回输入）留下的“说完 3 秒写入”定时器要清掉，不然会在这次说话中途触发，提前结束
         main.removeCallbacksAndMessages(flushToken)
@@ -216,13 +256,6 @@ object Voice {
         if (inSession()) lastComposing = text
     }
 
-    private fun onCommit(text: String) {
-        if (!inSession() || recording) return
-        if (text.isBlank()) return
-        lastComposing = text
-        speakFinal("上屏")
-    }
-
     private fun onFinish() {
         if (!inSession() || recording) return
         main.removeCallbacksAndMessages(token)
@@ -231,12 +264,12 @@ object Voice {
 
     private fun speakFinal(why: String) {
         if (spoken) return
-        val t = lastComposing.trim()
+        val t = confirmedWritten.trim()
         if (t.isEmpty()) return
         spoken = true
         sessionUntil = 0
         main.removeCallbacksAndMessages(token)
         L.i("语音识别结果（$why）：「$t」")
-
+        if (echoGate.accept(echoToken)) TypingEcho.voiceResult(t)
     }
 }

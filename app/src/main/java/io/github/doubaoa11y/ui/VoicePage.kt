@@ -13,12 +13,13 @@ import io.github.doubaoa11y.SpeechEngine
 object VoicePage {
     fun fill(a: SettingsActivity, root: LinearLayout) {
         a.addKeys(root, "speakByReader")
-        root.addView(a.note("独立语音库只接管模块发出的按键、候选和手势提示，不静音屏幕阅读器。应用自己的文字、选区提示仍由读屏决定；语音库未准备好或不可用时回退读屏。"))
+        val first = root.childCount
         val selected = a.prefs.getString("ttsEngine", "").orEmpty()
         root.addView(a.button("语音库：${selected.ifEmpty { "系统默认" }}") { chooseEngine(a) })
         root.addView(a.button("发音人：${a.prefs.getString("ttsVoice", "").orEmpty().ifEmpty { "默认" }}") { chooseVoice(a) })
-        a.addKeys(root, "ttsRate", "ttsPitch", "ttsVolume", "ttsA11yStream")
-        root.addView(a.button("准备语音库并测试朗读") {
+        a.addKeys(root, "ttsRate", "ttsPitch", "ttsVolume")
+
+        root.addView(a.button("试听语音效果") {
             SpeechEngine.prepare(a, a.prefs)
             Handler(Looper.getMainLooper()).postDelayed({
                 if (!a.isFinishing && !a.isDestroyed) {
@@ -27,6 +28,13 @@ object VoicePage {
                 }
             }, 1000)
         })
+        a.addKeys(root, "ttsA11yStream")
+        a.addKeys(root, "ttsInputEcho", "ttsDeleteEcho", "ttsVoiceEcho", "ttsPunctuationNames")
+        fun enable(view: android.view.View, value: Boolean) {
+            view.isEnabled = value
+            if (view is android.view.ViewGroup) for (i in 0 until view.childCount) enable(view.getChildAt(i), value)
+        }
+        for (i in first until root.childCount) enable(root.getChildAt(i), !a.prefs.getBoolean("speakByReader", true))
     }
 
     private fun chooseEngine(a: SettingsActivity) {

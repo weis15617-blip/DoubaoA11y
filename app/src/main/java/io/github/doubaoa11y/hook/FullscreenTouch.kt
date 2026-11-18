@@ -81,6 +81,7 @@ object FullscreenTouch {
         }
 
         // ---- 键盘区 ----
+        if (Config.typeMode == ConfigSpec.TYPE_DOUBLE_TAP) return false
         if (ev.pointerCount >= 2 || twoDown) return twoFinger(root, ev)
 
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {

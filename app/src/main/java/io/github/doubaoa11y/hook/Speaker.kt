@@ -35,7 +35,8 @@ object Speaker {
         if (!Config.b("speakByReader")) {
             ttsRequested = true
             val ok = try {
-                val b = Bundle().apply { putString("text", text.take(4000)) }
+                val spoken = if (Config.b("ttsPunctuationNames")) Names.punctuationText(text) else text
+                val b = Bundle().apply { putString("text", spoken.take(4000)) }
                 ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
             } catch (t: Throwable) { L.hookError("Speaker.tts", t); false }
             if (ok) return

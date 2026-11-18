@@ -9,12 +9,8 @@ import io.github.doubaoa11y.ConfigSpec
  */
 object GesturePage {
     fun fill(a: SettingsActivity, root: LinearLayout) {
-        root.addView(a.button("编辑选项（共 ${a.editOptions().size} 项）") {
-            a.startActivity(Intent(a, SettingsActivity::class.java).putExtra(SettingsActivity.EXTRA_PAGE, SettingsActivity.EDITOPTS))
-        })
-
-        root.addView(a.heading("手势"))
-        // 灵敏度放最前面：手感不对的先去调它
+        a.addKeysNoHint(root, "upperOperation")
+        EditOptsPage.fill(a, root)
         a.addKeysNoHint(root, "gestureSensitivity")
 
         // 单指、双指、拖动，直接排下来，每组一个标题
@@ -41,11 +37,40 @@ object GesturePage {
         )
 
         root.addView(a.heading("候选与反馈"))
-        a.addKeysNoHint(root, "fsCandidateFirst", "fsHaptic", "fsSpeakAction", "fsSpeakChar")
+        a.addKeysNoHint(root, "fsSpeakAction", "fsSpeakChar")
 
-        root.addView(a.heading("按句移动"))
-        a.textField(root, "按句移动标点", "sentenceSymbols", "逗号或换行分开，如：。，；？！.!")
-
-        root.addView(a.button("恢复默认") { a.restoreGestureDefaults() })
+        root.addView(a.heading("按句移动光标"))
+        val symbols = ConfigSpec.sentenceList(a.prefs.getString("sentenceSymbols", "")).toMutableList()
+        fun save() {
+            a.prefs.edit().putString("sentenceSymbols", "list:" + symbols.joinToString("")).apply()
+            a.send(null)
+            a.rebuild()
+        }
+        root.addView(a.note("根据下列标点符号分隔句子，点击已有标点可删除"))
+        root.addView(a.button("添加标点") {
+            val input = android.widget.EditText(a).apply { hint = "输入一个标点或“换行”" }
+            android.app.AlertDialog.Builder(a).setTitle("添加标点").setView(input)
+                .setPositiveButton("添加") { _, _ ->
+                    val symbol = input.text.toString().let { if (it == "换行") "\n" else it }
+                    if (symbol.length == 1 && symbol !in symbols && (symbol == "\n" || Regex("\\p{P}").matches(symbol))) {
+                        symbols.add(symbol)
+                        save()
+                    } else a.toast("请输入一个尚未添加的标点或换行")
+                }.setNegativeButton("取消", null).show()
+        })
+        a.addList(
+            root,
+            symbols.map { if (it == "\n") "换行" else it },
+            descriptions = symbols.map { if (it == "\n") "换行" else io.github.doubaoa11y.hook.Names.spoken(it) },
+            onClick = { index ->
+                symbols.removeAt(index)
+                save()
+            },
+        )
+        root.addView(a.button("恢复默认") {
+            android.app.AlertDialog.Builder(a).setTitle("恢复默认")
+                .setMessage("恢复手势、编辑菜单和按句移动光标的默认设置？")
+                .setPositiveButton("恢复") { _, _ -> a.restoreGestureDefaults() }.setNegativeButton("取消", null).show()
+        })
     }
 }

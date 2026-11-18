@@ -127,6 +127,10 @@ object KeyboardViewHooks {
 
         // ---- 触摸 ----
         Hooker.method(c, "onTouchEvent", arrayOf(MotionEvent::class.java), SafeHook("onTouchEvent", before = { p ->
+            if (A11yState.recording && CustomToolbar.editing()) {
+                p.result = true
+                return@SafeHook
+            }
             if (!A11yState.recording || !Config.b("logTouch")) return@SafeHook
             val ev = p.args[0] as MotionEvent
             val msg = "触摸 窗口=${windowName(p.thisObject)} ${Fmt.action(ev.action)} x=${ev.x.toInt()} y=${ev.y.toInt()} 键=「${keyLabelAt(p.thisObject, ev.x, ev.y)}」"
@@ -138,8 +142,18 @@ object KeyboardViewHooks {
             SafeHook("dispatchHoverEvent", before = { p ->
                 val v = p.thisObject
                 if (!A11yState.active) return@SafeHook
+                if (CustomToolbar.editing()) {
+                    if (c.isInstance(v)) p.result = false
+                    return@SafeHook
+                }
                 val ev = p.args[0] as MotionEvent
                 if ((v as View).parent !is View) {
+                    val imeRoot = try {
+                        ViewA11yHooks.service?.window?.window?.decorView
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    if (v !== imeRoot) return@SafeHook
                     if (Config.b("logTouch") && ev.actionMasked != MotionEvent.ACTION_HOVER_MOVE)
                         L.i("根悬停 ${Fmt.action(ev.action)} x=${ev.x.toInt()} y=${ev.y.toInt()} t=${ev.eventTime}")
                     // 全屏输入：上半屏是模块的手势层，先交给它
@@ -173,6 +187,7 @@ object KeyboardViewHooks {
                     null
                 }
                 if (v !== imeRoot) return@SafeHook
+                if (A11yState.recording && CustomToolbar.editing()) return@SafeHook
                 // 全屏输入：整块窗口（上半屏手势区 + 下半屏键盘）都由模块自己的一套触摸浏览处理，
                 // 不看读屏的触摸浏览是开是关。见 FullscreenTouch
                 if (FullscreenTouch.handleTouch(v, e)) {

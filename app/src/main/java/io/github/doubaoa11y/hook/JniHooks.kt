@@ -58,7 +58,7 @@ object JniHooks {
         Hooker.method(c, "notifyCandidateBarPinyin", arrayOf(String::class.java, String::class.java),
             SafeHook("candidate.pinyinCleared", after = { p ->
                 if (p.args.size == 2 && p.args.all { it == null || (it is String && it.isBlank()) }) {
-                    Candidates.reset("拼音栏已空")
+                    Candidates.onPinyinCleared()
                 }
             }))
 

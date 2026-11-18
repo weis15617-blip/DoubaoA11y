@@ -37,6 +37,12 @@ object BackupFormat {
         for (key in raw.keys()) {
             val value = raw.get(key)
             when {
+                key in setOf("nativeEnter", "readerDirectControl", "fsHaptic", "fsCandidateFirst") -> require(value is Boolean)
+                key == "typeMode" && value == 2 -> {
+                    out[key] = ConfigSpec.TYPE_LIFT
+                    if (!raw.has("upperOperation")) out["upperOperation"] = true
+                }
+                key == "fsDragMs" && value == 150 -> out[key] = 200
                 key in booleanKeys -> { require(value is Boolean) { "开关格式错误：$key" }; out[key] = value }
                 ConfigSpec.intDefaults.containsKey(key) -> {
                     val item = ConfigSpec.intItems.first { it.key == key }
@@ -47,7 +53,7 @@ object BackupFormat {
                 }
                 ConfigSpec.strDefaults.containsKey(key) -> {
                     require(value is String && value.length <= 16000) { "文本格式错误或过长：$key" }
-                    if (key == ConfigSpec.EDIT_OPTIONS_KEY && value.isNotBlank()) {
+                    if (key == ConfigSpec.EDIT_OPTIONS_KEY && value.isNotBlank() && value != "[]") {
                         val ids = value.split(',').map { it.trim().toIntOrNull() }
                         require(ids.all { it != null } && ids == ConfigSpec.parseEditOptions(value)) { "编辑选项无效" }
                     }

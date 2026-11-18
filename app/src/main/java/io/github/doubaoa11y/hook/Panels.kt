@@ -40,6 +40,14 @@ object Panels {
 
     /** 这个控件被打开的界面盖住了（不在界面里面，也不是界面的上层容器） */
     fun covered(v: View): Boolean {
+        if (CustomToolbar.editing()) {
+            val imeRoot = try {
+                ViewA11yHooks.service?.window?.window?.decorView
+            } catch (_: Throwable) {
+                null
+            }
+            if (imeRoot != null && v.rootView === imeRoot) return true
+        }
         val panel = active() ?: return false
         if (v.rootView !== panel.rootView) return false
         return !isDescendant(v, panel) && !isDescendant(panel, v)

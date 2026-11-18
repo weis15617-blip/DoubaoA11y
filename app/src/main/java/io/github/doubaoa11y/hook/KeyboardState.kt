@@ -69,6 +69,7 @@ object KeyboardState {
         lastBoard = name
         lastShift = ""
         L.i("当前键盘：$name")
+        if (!first) Sound.play("scroll")
         if (first || !speakOn) return
         say(name, 60)
     }

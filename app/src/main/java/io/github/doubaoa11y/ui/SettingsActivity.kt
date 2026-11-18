@@ -32,6 +32,7 @@ class SettingsActivity : Activity() {
         const val CANDIDATE = "candidate"
         const val STATE = "state"
         const val VOICE = "voice"
+        const val SOUND = "sound"
         const val GESTURE = "gesture"
         const val EDITOPTS = "editopts"
         const val WORDS = "words"
@@ -60,12 +61,17 @@ class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        ConfigSpec.migrateInput(prefs)
         ConfigSpec.migrateGestureDefaults(prefs)
         ConfigSpec.migrateEditOptions(prefs)
         autoOffLog()
         pad = (16 * resources.displayMetrics.density).toInt()
-        page = intent.getStringExtra(EXTRA_PAGE) ?: HOME
-        if (page == WORDS) WordsPage(this).show() else build()
+        page = when (val raw = intent.getStringExtra(EXTRA_PAGE) ?: HOME) {
+            WORDS -> CANDIDATE
+            SOUND -> STATE
+            else -> raw
+        }
+        build()
         if (page == HOME) {
             val agreedBefore = Disclaimer.agreed(this)
             Disclaimer.showIfNeeded(this) { send(ConfigSpec.CMD_STATUS) }
@@ -82,6 +88,7 @@ class SettingsActivity : Activity() {
     }
 
     override fun onDestroy() {
+        WordTransfer.detach(this)
         SettingsBackup.detach(this)
         super.onDestroy()
     }
@@ -99,8 +106,9 @@ class SettingsActivity : Activity() {
         CANDIDATE -> "候选与朗读"
         STATE -> "提示与震动"
         VOICE -> "语音播报"
-        GESTURE -> "全屏与手势"
-        EDITOPTS -> "自定义编辑选项"
+        SOUND -> "音效管理"
+        GESTURE -> "上半屏操作与手势"
+        EDITOPTS -> "自定义编辑菜单"
         WORDS -> "自定义解释词"
         HELP -> "使用帮助"
         ADVANCED -> "高级"
@@ -118,25 +126,29 @@ class SettingsActivity : Activity() {
             HOME -> home(root)
             INPUT -> {
                 addGroup(root, Group.INPUT)
-                root.addView(note("可切换抬手输入、标准输入与全屏输入；全屏手势可在首页的“全屏与手势”中设置"))
+                root.addView(note("可切换抬手输入与标准输入"))
                 root.addView(heading("延迟调整"))
                 addGroup(root, Group.HOLD)
-                root.addView(note("提示：停留在删除键可连续删除，空格键可开始语音；模块按抬手方式处理时，回车、发送键停留可触发豆包长按行为。标准输入的双击操作保持原样；改为豆包原生操作的键不使用模块停留时间"))
+                root.addView(note("提示：删除键长按可连续删除，空格键长按可开始语音输入，回车键短按发送，长按换行（需打开回车发送）"))
                 root.addView(heading("快速输入"))
                 addGroup(root, Group.FAST)
             }
             CANDIDATE -> {
                 addKeys(root, "charExplain", "explainMaxLen", "candidateNav")
-                root.addView(note("提示：请在豆包输入法app内调整键盘布局"))
+                root.addView(note("提示：如果26键找不到右侧的右移，请在豆包输入法app内调整键盘布局"))
+                WordsPage(this).fill(root)
             }
             STATE -> {
                 root.addView(heading("键盘状态提示"))
-                addGroup(root, Group.STATE)
+                addKeys(root, "announceMode", "announceOnShow", "announceHide", "voiceZoneHint")
+                root.addView(heading("音效"))
+                SoundPage.fill(this, root)
                 root.addView(heading("震动"))
                 addGroup(root, Group.VIBRATE)
                 root.addView(note("提示：豆包原生震动与声音请在豆包输入法app内调整"))
             }
             VOICE -> VoicePage.fill(this, root)
+            SOUND -> SoundPage.manage(this, root)
             GESTURE -> GesturePage.fill(this, root)
             EDITOPTS -> EditOptsPage.fill(this, root)
             HELP -> HelpPage.fill(this, root)
@@ -149,7 +161,7 @@ class SettingsActivity : Activity() {
 
     private fun home(root: LinearLayout) {
         val st = TextView(this).apply {
-            text = "状态：正在查询…"
+            text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：正在查询…"
             isFocusable = true
             setPadding(0, pad / 2, 0, pad / 2)
         }
@@ -161,21 +173,15 @@ class SettingsActivity : Activity() {
         root.addView(fix)
         root.addView(button("查询模块状态") { send(ConfigSpec.CMD_STATUS) })
 
-        val upd = TextView(this).apply {
-            text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}"
-            isFocusable = true
-            setPadding(0, pad, 0, pad / 2)
-        }
-        root.addView(upd)
-        root.addView(button("检查更新") { Updater.check(this, upd) })
+        root.addView(button("检查更新") { Updater.check(this, st) })
 
         root.addView(heading("设置"))
-        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, WORDS, HELP, ADVANCED)) root.addView(entry(p))
+        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, HELP, ADVANCED)) root.addView(entry(p))
 
         root.addView(heading("关于"))
         root.addView(info("作者：$AUTHOR"))
         root.addView(info("QQ群：$QQ_GROUP"))
-        root.addView(button("GitHub项目地址：$GITHUB") { open(GITHUB) })
+        root.addView(button("访问我的github仓库地址") { open(GITHUB) })
     }
 
     /** 首页状态下面的解决按钮：豆包里是旧版模块、或者读屏没开时出现 */
@@ -199,7 +205,7 @@ class SettingsActivity : Activity() {
                     staleWarned = true
                     val msg = "豆包输入法里运行的还是旧版模块。请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘。" +
                         "用 LSPatch 集成模式的，要用新模块重新修补豆包。"
-                    status?.text = "状态：$msg"
+                    status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
                     Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
                 }
             }
@@ -253,7 +259,7 @@ class SettingsActivity : Activity() {
         root.addView(button("全部恢复默认") {
             AlertDialog.Builder(this)
                 .setTitle("恢复默认")
-                .setMessage("确定要把全部设置恢复默认吗？桌面图标会恢复显示，自定义解释词不受影响。")
+                .setMessage("确定要把全部设置恢复默认吗？桌面图标会恢复显示，自定义解释词和已导入音频文件保留。")
                 .setPositiveButton("确定") { _, _ ->
                     try {
                         Shortcut.setShown(this, true)
@@ -265,7 +271,7 @@ class SettingsActivity : Activity() {
                     val e = prefs.edit()
                     for (item in ConfigSpec.items) e.remove(item.key)
                     for (item in ConfigSpec.intItems) e.remove(item.key)
-                    for (item in ConfigSpec.strItems) e.remove(item.key)
+                    for (item in ConfigSpec.strItems) if (item.key != "soundNames") e.remove(item.key)
                     e.apply()
                     io.github.doubaoa11y.SpeechEngine.stop()
                     build()
@@ -287,7 +293,7 @@ class SettingsActivity : Activity() {
             true
         } catch (t: Throwable) {
             toggle.isEnabled = false
-            val msg = "无法读取桌面图标状态：${t.message ?: t.javaClass.simpleName}"
+            val msg = "无法读取桌面图标当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：${t.message ?: t.javaClass.simpleName}"
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             false
         } finally {
@@ -302,6 +308,17 @@ class SettingsActivity : Activity() {
         syncLauncherSwitch(this)
         setOnCheckedChangeListener { _, checked ->
             if (syncingLauncher) return@setOnCheckedChangeListener
+            if (!checked) {
+                syncLauncherSwitch(this)
+                AlertDialog.Builder(this@SettingsActivity).setTitle("隐藏桌面图标？")
+                    .setMessage("隐藏后可从 LSPosed 或 LSPatch 的模块设置重新打开，并恢复桌面图标。")
+                    .setPositiveButton("隐藏") { _, _ ->
+                        try { Shortcut.setShown(this@SettingsActivity, false) }
+                        catch (_: Throwable) { toast("隐藏桌面图标失败") }
+                        syncLauncherSwitch(this)
+                    }.setNegativeButton("取消", null).show()
+                return@setOnCheckedChangeListener
+            }
             val msg = try {
                 Shortcut.setShown(this@SettingsActivity, checked)
                 if (checked) "已显示桌面图标" else "已隐藏桌面图标，可从 LSPosed 或 LSPatch 的模块设置打开"
@@ -346,11 +363,12 @@ class SettingsActivity : Activity() {
             e.apply()
             if ((item.key == "speakByReader" && checked) || (item.key == "moduleOn" && !checked)) io.github.doubaoa11y.SpeechEngine.stop()
             send(null)
+            if (item.key == "speakByReader") rebuild()
         }
     }
 
     /** 选择项：按钮显示当前值，点一下弹出单选框 */
-    private fun choice(item: ConfigSpec.IntItem): Button {
+    private fun choice(item: ConfigSpec.IntItem): View {
         val b = Button(this)
         fun label(): String {
             val cur = prefs.getInt(item.key, item.default)
@@ -375,6 +393,43 @@ class SettingsActivity : Activity() {
                 .show()
         }
         return b
+    }
+
+    /** 与候选解释词相同的列表格式（ListView + TextView 列表项），支持点击与长按 */
+    fun addList(
+        parent: LinearLayout,
+        items: List<String>,
+        descriptions: List<String>? = null,
+        onClick: (Int) -> Unit,
+        onLongClick: ((Int) -> Boolean)? = null,
+    ): android.widget.ListView {
+        val list = object : android.widget.ListView(this) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val expandSpec = MeasureSpec.makeMeasureSpec(Int.MAX_VALUE shr 2, MeasureSpec.AT_MOST)
+                super.onMeasure(widthMeasureSpec, expandSpec)
+            }
+        }
+        list.isFocusable = false
+        list.adapter = object : android.widget.BaseAdapter() {
+            override fun getCount() = items.size
+            override fun getItem(position: Int) = items[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val tv = (convertView as? TextView) ?: TextView(this@SettingsActivity).apply {
+                    textSize = 18f
+                    setPadding(pad / 2, pad / 2, pad / 2, pad / 2)
+                }
+                tv.text = items[position]
+                tv.contentDescription = descriptions?.getOrNull(position)
+                return tv
+            }
+        }
+        list.setOnItemClickListener { _, _, pos, _ -> onClick(pos) }
+        if (onLongClick != null) {
+            list.setOnItemLongClickListener { _, _, pos, _ -> onLongClick(pos) }
+        }
+        parent.addView(list, matchWidth())
+        return list
     }
 
     /** 进入另一页的按钮 */
@@ -428,8 +483,8 @@ class SettingsActivity : Activity() {
     fun restoreGestureDefaults() {
         val e = prefs.edit()
         for ((slot, _) in ConfigSpec.GESTURE_SLOTS) e.putInt(ConfigSpec.gestureKey(slot), ConfigSpec.gestureDefault(slot))
-        for (key in listOf("fsDrag", "fsHaptic", "fsSpeakAction", "fsSpeakChar", "fsCandidateFirst")) e.remove(key)
-        e.remove(ConfigSpec.EDIT_OPTIONS_KEY).apply()
+        for (key in listOf("upperOperation", "fsDrag", "fsHaptic", "fsSpeakAction", "fsSpeakChar", "fsCandidateFirst")) e.remove(key)
+        e.remove("gestureSensitivity").remove("fsDragMs").remove("sentenceSymbols").remove(ConfigSpec.EDIT_OPTIONS_KEY).apply()
         send(null); build()
     }
     fun textField(root: LinearLayout, label: String, key: String, hint: String) {
@@ -444,12 +499,17 @@ class SettingsActivity : Activity() {
     @Deprecated("系统文件选择器结果")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (WordTransfer.onResult(this, requestCode, resultCode, data?.data)) return
+        if (SoundPage.onResult(this, requestCode, resultCode, data?.data)) return
         SettingsBackup.onResult(this, requestCode, resultCode, data?.data)
     }
 
     /** 把全部设置值（和可选命令）发给豆包进程；用有序广播拿回执 */
     fun send(cmd: String?) {
+        if (!prefs.getBoolean("moduleOn", true) || !prefs.getBoolean("soundOn", false)) io.github.doubaoa11y.SoundEngine.stop()
         val intent = Intent(ConfigSpec.ACTION_CONFIG).setPackage(ConfigSpec.TARGET_PACKAGE)
+        intent.clipData = android.content.ClipData.newRawUri("config", io.github.doubaoa11y.SettingsProvider.URI)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         for (item in ConfigSpec.items) intent.putExtra(item.key, prefs.getBoolean(item.key, item.default))
         for (item in ConfigSpec.intItems) intent.putExtra(item.key, prefs.getInt(item.key, item.default))
         for (item in ConfigSpec.strItems) intent.putExtra(item.key, prefs.getString(item.key, item.default) ?: item.default)
@@ -459,6 +519,20 @@ class SettingsActivity : Activity() {
             sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
                 override fun onReceive(context: Context, i: Intent) {
                     val ok = resultCode == RESULT_OK && resultData != null
+                    if (ok) {
+                        val rx = getResultExtras(false)
+                        if (rx != null) {
+                            val ed = prefs.edit()
+                            var synced = false
+                            for (k in listOf("upperOperation", "screenToolbar")) {
+                                if (rx.containsKey("sync_$k")) {
+                                    ed.putBoolean(k, rx.getBoolean("sync_$k"))
+                                    synced = true
+                                }
+                            }
+                            if (synced) ed.apply()
+                        }
+                    }
                     // 改开关时成功就不打扰，只在没送到时提示
                     if (cmd == null && ok) return
                     val msg = if (ok) {
@@ -472,9 +546,10 @@ class SettingsActivity : Activity() {
                     }
                     val st = status
                     if (st != null) {
-                        st.text = "状态：$msg"
+                        st.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
                         st.announceForAccessibility(msg)
                         if (ok) checkResult(getResultExtras(false))
+                        else showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this@SettingsActivity) }
                     } else if (ok && cmd != null) {
                         // 复制、保存日志这类命令：结果用对话框显示，读屏会读出来
                         if (!isFinishing) AlertDialog.Builder(this@SettingsActivity)
@@ -487,7 +562,7 @@ class SettingsActivity : Activity() {
                 }
             }, null, RESULT_CANCELED, null, null)
         } catch (t: Throwable) {
-            status?.text = "状态：发送失败 ${t.message}"
+            status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：发送失败 ${t.message}"
         }
     }
 }

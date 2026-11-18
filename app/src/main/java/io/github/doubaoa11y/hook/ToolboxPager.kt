@@ -36,7 +36,7 @@ object ToolboxPager {
     /** 读屏自己让菜单翻页（滚动动作）：翻完把焦点放到新一页第一个项目 */
     fun afterScroll(v: View) {
         val panel = panelOf(v) ?: return
-        main.postDelayed({ focusFirst(panel) }, 350)
+        main.postDelayed({ Sound.play("scroll"); focusFirst(panel) }, 350)
     }
 
     private fun panelOf(v: View): View? {
@@ -92,6 +92,7 @@ object ToolboxPager {
 
     /** 让小圆点进到读屏的焦点列表里：容器本身算一个控件，里面的圆点不单独算 */
     fun prepare(panel: View) {
+        if (CustomToolbar.isPanel(panel)) CustomToolbar.ensureOptionBlock(panel)
         val ind = findIndicator(panel) ?: return
         val (cur, count) = pageInfo(panel) ?: return
         if (count <= 1) return
@@ -124,6 +125,7 @@ object ToolboxPager {
             return false
         }
         L.i("工具箱翻到第 ${next + 1} 页")
+          Sound.play("scroll")
         main.postDelayed({
             prepare(panel)
             focusFirst(panel)

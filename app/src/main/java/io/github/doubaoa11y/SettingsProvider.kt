@@ -21,6 +21,7 @@ class SettingsProvider : ContentProvider() {
         val identity = Binder.clearCallingIdentity()
         try {
         val p = ctx.getSharedPreferences(ConfigSpec.SETTINGS_PREFS, Context.MODE_PRIVATE)
+        ConfigSpec.migrateInput(p)
         return when (method) {
             "dump" -> Bundle().apply {
                 for (i in ConfigSpec.items) putBoolean(i.key, p.getBoolean(i.key, i.default))
@@ -28,11 +29,13 @@ class SettingsProvider : ContentProvider() {
                 for (i in ConfigSpec.strItems) putString(i.key, p.getString(i.key, i.default)?.take(16000))
                 putString(ConfigSpec.EXTRA_CUSTOM_WORDS, p.getString(ConfigSpec.EXTRA_CUSTOM_WORDS, "")?.take(200000))
             }
-            "set" -> Bundle().apply {
-                // 键盘端仅能反向切换输入方式，不能打开日志或改动用户其他设置。
-                val value = extras?.getInt("typeMode", -1) ?: -1
-                require(value in ConfigSpec.intItems.first { it.key == "typeMode" }.options.map { it.first })
-                p.edit().putInt("typeMode", value).apply()
+            "setUpperOperation" -> Bundle().apply {
+                require(extras?.get("upperOperation") is Boolean)
+                putBoolean("saved", p.edit().putBoolean("upperOperation", extras!!.getBoolean("upperOperation")).commit())
+            }
+            "setToolbar" -> Bundle().apply {
+                require(extras?.get("screenToolbar") is Boolean)
+                putBoolean("saved", p.edit().putBoolean("screenToolbar", extras!!.getBoolean("screenToolbar")).commit())
             }
             "speak" -> Bundle().apply {
                 val text = extras?.getString("text").orEmpty()
@@ -44,6 +47,16 @@ class SettingsProvider : ContentProvider() {
                 if (p.getBoolean("moduleOn", true) && !p.getBoolean("speakByReader", true)) SpeechEngine.prepare(ctx, p)
             }
             "stop" -> Bundle().apply { SpeechEngine.stop() }
+            "sound" -> Bundle().apply { putBoolean("accepted", SoundEngine.play(ctx, extras?.getString("event").orEmpty())) }
+            "openSound" -> Bundle().apply {
+                val id = arg.orEmpty()
+                if (io.github.doubaoa11y.ui.ZipBackup.validSlot(id)) {
+                    val f = SoundEngine.file(ctx, id)
+                    if (f.isFile) {
+                        putParcelable("fd", android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY))
+                    }
+                }
+            }
             else -> throw IllegalArgumentException("不支持的设置操作")
         }
         } finally { Binder.restoreCallingIdentity(identity) }

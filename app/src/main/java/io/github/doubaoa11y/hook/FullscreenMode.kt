@@ -14,7 +14,7 @@ import android.widget.FrameLayout
 import io.github.doubaoa11y.ConfigSpec
 
 /**
- * 全屏输入模式。
+ * 上半屏操作模式。
  *
  * 关键点（1.1.7 修正）：豆包输入法自己的窗口本来就是满屏的——
  * ImeService.onConfigureWindow 里它自己调了 setLayout(MATCH_PARENT, MATCH_PARENT)，
@@ -66,7 +66,7 @@ object FullscreenMode {
     /** 上一次应用的布局（宽/高/键盘顶边），没变就不重复请求布局 */
     private var lastLayoutKey = ""
 
-    /** 该不该全屏：输入方式选了全屏输入，并且模块总开关开着，并且没被“暂时关闭全屏” */
+    /** 该不该全屏：输入方式选了上半屏操作，并且模块总开关开着，并且没被“暂时关闭全屏” */
     val wanted: Boolean get() = Config.fullscreen && A11yState.moduleOn && A11yState.recording && !tempSuspended
 
     /**
@@ -93,23 +93,21 @@ object FullscreenMode {
      * 工具栏上的“切换全屏和半屏”按钮：在模块的输入方式里真正切一次，立即全局生效。
      *
      * 和“暂时关闭全屏模式”不同——那个只是这一次收起全屏，下次展开还会回来；
-     * 这里改的是设置里的输入方式本身（全屏输入 ↔ 半屏输入），并且写回设置页那一份，
+     * 这里改的是设置里的输入方式本身（上半屏操作 ↔ 半屏输入），并且写回设置页那一份，
      * 所以键盘收起再展开、换应用、重启输入法都按新的来。
      */
     fun toggleScreenMode(): Boolean {
-        val wasFull = Config.fullscreen
-        val target = if (wasFull) ConfigSpec.TYPE_LIFT else ConfigSpec.TYPE_FULLSCREEN
-        Config.setInt("typeMode", target)
-        Config.push(imeContext(), "typeMode", target)
-        L.i("工具栏切换输入方式：${if (wasFull) "全屏 → 半屏" else "半屏 → 全屏"}")
+        val next = !Config.fullscreen
+        Config.setFromIme(imeContext(), "upperOperation", next)
         tempSuspended = false
-        if (target == ConfigSpec.TYPE_FULLSCREEN) {
+        if (next) {
             attach("工具栏切到全屏")
-            Speaker.speak("已切换到全屏输入")
+            Speaker.speak("已开启上半屏手势")
         } else {
             detach("工具栏切到半屏")
-            Speaker.speak("已切换到半屏输入")
+            Speaker.speak("已关闭上半屏手势")
         }
+        ModuleEntries.toolbar()
         return true
     }
 
@@ -123,7 +121,7 @@ object FullscreenMode {
 
     fun onWindowShown() {
         if (!wanted) {
-            detach("不是全屏输入")
+            detach("不是上半屏操作")
             return
         }
         attach("键盘显示")
@@ -204,7 +202,7 @@ object FullscreenMode {
             try {
                 dv.addView(l, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
             } catch (t: Throwable) {
-                L.e("全屏输入：手势层挂不上", t)
+                L.e("上半屏操作：手势层挂不上", t)
                 decor = null
                 dialog = null
                 fail("手势层挂不上")
@@ -281,7 +279,7 @@ object FullscreenMode {
         if (first) {
             active = true
             failedReason = ""
-            L.i("全屏输入生效：窗口 ${winW}x$winH，键盘顶边 $kbTop，手势区高 $kbTop")
+            L.i("上半屏操作生效：窗口 ${winW}x$winH，键盘顶边 $kbTop，手势区高 $kbTop")
             // 区域穿透可用时交给输入法，否则继续保留读屏悬停。
             TouchGuard.pause()
             // 窗口刚展开时区域可能尚未就绪，稍后补发。
@@ -317,7 +315,7 @@ object FullscreenMode {
             lp.height = ViewGroup.LayoutParams.MATCH_PARENT
             if (lp.gravity and Gravity.BOTTOM == 0) lp.gravity = lp.gravity or Gravity.BOTTOM
             w.attributes = lp
-            L.i("全屏输入：窗口原本只有 ${forcedHeight} 高，已撑满")
+            L.i("上半屏操作：窗口原本只有 ${forcedHeight} 高，已撑满")
         } catch (t: Throwable) {
             L.hookError("FullscreenMode.forceWindowFull", t)
         }
@@ -390,11 +388,11 @@ object FullscreenMode {
     /** 全屏没做成：写状态、写日志，并读给用户听（10 秒内只读一次，免得刷屏） */
     private fun fail(why: String) {
         failedReason = why
-        L.w("全屏输入没生效：$why")
+        L.w("上半屏操作没生效：$why")
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastFailSpoke > 10_000) {
             lastFailSpoke = now
-            Speaker.speak("全屏输入没生效，已按半屏输入处理")
+            Speaker.speak("上半屏操作没生效，已按半屏输入处理")
         }
     }
 
@@ -481,9 +479,9 @@ object FullscreenMode {
         if (dv != null) requestInsets(dv)
         // 只要这次退出时触摸浏览还被模块关着，就一定要打开——不能因为 active 已经提前置 false 就漏掉
         if (was || TouchGuard.isPaused) {
-            L.i("退出全屏输入（$why）")
+            L.i("退出上半屏操作（$why）")
             // 退出后撤销整屏区域穿透，恢复原有键盘区域。
-            TouchGuard.resume("退出全屏输入（$why）")
+            TouchGuard.resume("退出上半屏操作（$why）")
         }
     }
 
@@ -609,11 +607,11 @@ object FullscreenMode {
     }
 
     fun status(): String = when {
-        !Config.fullscreen -> "当前不是全屏输入"
-        active -> "全屏输入已生效，手势区高 $kbTop，窗口 ${winW}x$winH。${FullscreenTouch.describe()}"
+        !Config.fullscreen -> "当前不是上半屏操作"
+        active -> "上半屏操作已生效，手势区高 $kbTop，窗口 ${winW}x$winH。${FullscreenTouch.describe()}"
         failedReason.isNotEmpty() -> failedReason
-        wanted -> "全屏输入正在准备"
-        else -> "全屏输入未启用"
+        wanted -> "上半屏操作正在准备"
+        else -> "上半屏操作未启用"
     }
 
     /** 给日志用的一行诊断 */

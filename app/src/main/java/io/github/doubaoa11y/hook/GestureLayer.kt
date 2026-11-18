@@ -123,7 +123,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
      * 单击和双击之间的等待时间，取系统的双击超时（一般 300 毫秒）。
      *
      * 1.2.1 起，只有“可能造成不可挽回后果”的单击（删除、清空、粘贴、发送、上屏候选这些）
-     * 才真的等这么久；朗读、移动光标、切换编辑选项这类单击在抬手时立刻执行，
+     * 才真的等这么久；朗读、移动光标、切换编辑菜单这类单击在抬手时立刻执行，
      * 所以“上半屏单指单击有延迟”这个毛病没有了。
      *
      * 1.2.2 补：双击槽位绑了动作时也必须等——不等的话，双击会把单击动作也执行一遍
@@ -307,7 +307,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
             // 等一个双击窗口，确认不是双击再执行
             main.postDelayed(singleRunner, doubleGapMs)
         } else {
-            // 朗读、移动光标、切编辑选项：抬手就执行，不等
+            // 朗读、移动光标、切编辑菜单：抬手就执行，不等
             tapFired = true
             fire(ConfigSpec.G_SINGLE_TAP, "单指单击")
             main.postDelayed(tapRunner, doubleGapMs)
@@ -420,7 +420,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
             //
             // 另外两个条件放宽过（用户反馈“候选手势没了”）：
             // - 选择态用 stillSelectingNow() 自检，标志位有残留就直接清掉，不再因为卡住把候选整段跳过；
-            // - 左右/上下滑不看 EditOptions.isFresh()，只有单击/双击才看（切完编辑选项马上点，执行的是那个选项）。
+            // - 左右/上下滑不看 EditOptions.isFresh()，只有单击/双击才看（切完编辑菜单马上点，执行的是那个选项）。
             if (Config.b("fsCandidateFirst") &&
                 Candidates.hasCandidates() && !EditActions.stillSelectingNow()
             ) {
@@ -442,8 +442,11 @@ class GestureLayer(ctx: Context) : View(ctx) {
                         if (Config.b("fsHaptic")) Haptic.tick()
                         // 候选手势归“手势”：做成了放手势音，到头/清空不了放“做不了”的音
                         if (done) {
-                        } else {                        }
-                        // 上屏没做成也停在这里，不再掉到“执行编辑选项”上去做别的事
+                            Sound.play("gesture")
+                        } else {
+                            Sound.play("boundary")
+                        }
+                        // 上屏没做成也停在这里，不再掉到“执行编辑菜单”上去做别的事
                         if (!done) Speaker.speak(if (upDown && slot == ConfigSpec.G_SINGLE_UP) "清空候选没成功" else "候选没上屏")
                         lastAt = SystemClock.uptimeMillis()
                         return
@@ -452,13 +455,15 @@ class GestureLayer(ctx: Context) : View(ctx) {
             }
             val action = GestureMap.actionOf(slot)
             if (Config.b("fsHaptic")) Haptic.tick()
-            if (action == ConfigSpec.ACT_NONE) {                Speaker.speak("${GestureMap.slotName(slot)}没有设置动作")
+            if (action == ConfigSpec.ACT_NONE) {
+                Sound.play("boundary")
+                Speaker.speak("${GestureMap.slotName(slot)}没有设置动作")
                 return
             }
             L.i("全屏手势（$how）：${GestureMap.slotName(slot)} → ${GestureMap.actionName(action)}")
             // 关掉“执行手势后朗读结果”：动作自己的播报（“已删除”“行尾”）临时吞掉，
             // 但做不成时下面会取消静音，照样把原因读出来。
-            // 切换编辑选项本身就是“读出来”的动作，关掉也不能把它吞掉，
+            // 切换编辑菜单本身就是“读出来”的动作，关掉也不能把它吞掉，
             // 否则上下滑切选项完全没声，用户不知道切到哪一项了
             val navOption = action == ConfigSpec.ACT_PREV_OPTION ||
                 action == ConfigSpec.ACT_NEXT_OPTION || action == ConfigSpec.ACT_RUN_OPTION
@@ -470,9 +475,15 @@ class GestureLayer(ctx: Context) : View(ctx) {
                 false
             }
             if (!ok) {
+                Sound.play("boundary")
                 Speaker.unmute()
-                if (Config.b("fsHaptic")) Haptic.tick(2)                Speaker.speak(GestureMap.failHint(action))
-            } else if (double) {            } else {            }
+                if (Config.b("fsHaptic")) Haptic.tick(2)
+                Speaker.speak(GestureMap.failHint(action))
+            } else if (double) {
+                Sound.play("double")
+            } else {
+                Sound.play("gesture")
+            }
             lastAt = SystemClock.uptimeMillis()
         }
 

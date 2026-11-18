@@ -80,10 +80,14 @@ object Config {
         if (now - lastPull < 800) return false
         lastPull = now
         return try {
+            for (k in listOf("upperOperation", "screenToolbar")) {
+                if (isDirty(k)) setFromIme(ctx, k, values[k] ?: (ConfigSpec.defaults[k] ?: false))
+            }
             val b = ctx.contentResolver.call(PULL_URI, "dump", null, null) ?: return false
             var changed = false
             val e = prefs?.edit()
             for (item in ConfigSpec.items) {
+                if (isDirty(item.key)) continue
                 if (!b.containsKey(item.key)) continue
                 val v = b.getBoolean(item.key, item.default)
                 if (values[item.key] != v) {
@@ -120,7 +124,10 @@ object Config {
             }
             if (changed) {
                 e?.apply()
+                Sound.onConfigChanged()
                 L.i("已从设置页同步配置：${summary()}")
+            } else {
+                Sound.syncCustomSounds()
             }
             changed
         } catch (t: Throwable) {
@@ -162,6 +169,48 @@ object Config {
         }
     }
 
+    /**
+     * 在输入法进程内切换设置（如工具栏切换上半屏手势、定制工具栏添加/移除按钮）：
+     * 即使模块设置页后台已关闭、ContentProvider 暂时不可达，也先在本地生效并标记待同步，
+     * 等设置页进程下次可访问时再写回，避免被旧配置覆盖。
+     */
+    fun setFromIme(ctx: Context?, key: String, v: Boolean) {
+        if (!ConfigSpec.defaults.containsKey(key)) return
+        values[key] = v
+        val method = when (key) {
+            "upperOperation" -> "setUpperOperation"
+            "screenToolbar" -> "setToolbar"
+            else -> null
+        }
+        var pushed = false
+        if (ctx != null && method != null) {
+            pushed = try {
+                val res = ctx.contentResolver.call(PUSH_URI, method, null, android.os.Bundle().apply { putBoolean(key, v) })
+                res?.getBoolean("saved") == true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        try {
+            prefs?.edit()?.putBoolean(key, v)?.putBoolean("dirty_$key", !pushed)?.apply()
+        } catch (t: Throwable) {
+            L.e("保存设置失败", t)
+        }
+    }
+
+    fun isDirty(key: String): Boolean = try {
+        prefs?.getBoolean("dirty_$key", false) == true
+    } catch (_: Throwable) {
+        false
+    }
+
+    fun clearDirty(key: String) {
+        try {
+            prefs?.edit()?.putBoolean("dirty_$key", false)?.apply()
+        } catch (_: Throwable) {
+        }
+    }
+
     /** 自定义解释词：字 -> 词 */
     @Volatile
     var customWords: Map<Char, String> = emptyMap()
@@ -197,7 +246,7 @@ object Config {
     /** 当前输入方式：半屏输入、标准输入或全屏输入 */
     val typeMode: Int get() = i("typeMode")
 
-    val fullscreen: Boolean get() = typeMode == io.github.doubaoa11y.ConfigSpec.TYPE_FULLSCREEN
+    val fullscreen: Boolean get() = b("upperOperation")
 
     fun summary(): String =
         ConfigSpec.items.joinToString("，") { "${it.key}=${if (b(it.key)) "开" else "关"}" } +
