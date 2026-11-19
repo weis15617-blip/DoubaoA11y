@@ -38,6 +38,7 @@ class SettingsActivity : Activity() {
         const val WORDS = "words"
         const val HELP = "help"
         const val ADVANCED = "advanced"
+        const val PATCH_WIZARD = "patch"
 
         const val AUTHOR = "乐天知命故不忧"
         const val QQ_GROUP = "1135031490"
@@ -52,6 +53,7 @@ class SettingsActivity : Activity() {
         private set
     private var status: TextView? = null
     private var fixButton: Button? = null
+    private var patchEntryButton: Button? = null
     var pad = 0
         private set
     private var page = HOME
@@ -83,11 +85,13 @@ class SettingsActivity : Activity() {
     override fun onResume() {
         super.onResume()
         launcherSwitch?.let { syncLauncherSwitch(it) }
+        PatchWizardPage.onResume(this)
         // 使用须知还没同意时先不查状态，免得读屏读状态盖过须知
         if (page == HOME && Disclaimer.agreed(this)) send(ConfigSpec.CMD_STATUS)
     }
 
     override fun onDestroy() {
+        PatchWizardPage.detach(this)
         WordTransfer.detach(this)
         SettingsBackup.detach(this)
         super.onDestroy()
@@ -112,6 +116,7 @@ class SettingsActivity : Activity() {
         WORDS -> "自定义解释词"
         HELP -> "使用帮助"
         ADVANCED -> "高级"
+        PATCH_WIZARD -> "一键安装与修补豆包"
         else -> "豆包输入法无障碍模块"
     }
 
@@ -153,6 +158,7 @@ class SettingsActivity : Activity() {
             EDITOPTS -> EditOptsPage.fill(this, root)
             HELP -> HelpPage.fill(this, root)
             ADVANCED -> advanced(root)
+            PATCH_WIZARD -> PatchWizardPage.fill(this, root)
         }
         setContentView(ScrollView(this).apply { addView(root) })
     }
@@ -174,6 +180,7 @@ class SettingsActivity : Activity() {
         root.addView(button("查询模块状态") { send(ConfigSpec.CMD_STATUS) })
 
         root.addView(button("检查更新") { Updater.check(this, st) })
+        patchEntryButton = entry(PATCH_WIZARD).also { root.addView(it) }
 
         root.addView(heading("设置"))
         for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, HELP, ADVANCED)) root.addView(entry(p))
@@ -185,11 +192,17 @@ class SettingsActivity : Activity() {
     }
 
     /** 首页状态下面的解决按钮：豆包里是旧版模块、或者读屏没开时出现 */
-    private fun showFix(label: String, onClick: () -> Unit) {
+    private fun showFix(label: String, isPatchShortcut: Boolean = false, onClick: () -> Unit) {
         val b = fixButton ?: return
         b.text = label
         b.setOnClickListener { onClick() }
         b.visibility = View.VISIBLE
+        patchEntryButton?.visibility = if (isPatchShortcut) View.GONE else View.VISIBLE
+    }
+
+    private fun hideFix() {
+        fixButton?.visibility = View.GONE
+        patchEntryButton?.visibility = View.VISIBLE
     }
 
     /** 豆包里运行的模块版本和本应用不一样：多半是更新后没有强行停止豆包 */
@@ -200,23 +213,35 @@ class SettingsActivity : Activity() {
         val active = extras?.getBoolean("active", true) ?: true
         when {
             running != ConfigSpec.MODULE_VERSION_CODE -> {
-                showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this) }
+                val localIntegrated = io.github.doubaoa11y.patch.ApkPatcher.inspect(this).kind ==
+                    io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED
+                if (localIntegrated) {
+                    showFix("一键同步新版模块到豆包", isPatchShortcut = true) {
+                        startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
+                    }
+                } else {
+                    showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this) }
+                }
                 if (!staleWarned && !isFinishing) {
                     staleWarned = true
-                    val msg = "豆包输入法里运行的还是旧版模块。请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘。" +
-                        "用 LSPatch 集成模式的，要用新模块重新修补豆包。"
+                    val msg = if (localIntegrated) {
+                        "豆包输入法里运行的还是旧版内嵌模块。请点击“一键同步新版模块到豆包”直接覆盖更新，无需卸载、不丢词库。"
+                    } else {
+                        "豆包输入法里运行的还是旧版模块。请在豆包输入法的应用信息里点“强行停止”，再弹出一次键盘。" +
+                            "用 LSPatch 集成模式的，要用新模块重新修补豆包。"
+                    }
                     status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
-                    Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
+                    if (!localIntegrated) Updater.forceStopDialog(this, "需要强行停止豆包输入法", msg)
                 }
             }
-            !prefs.getBoolean("moduleOn", true) -> fixButton?.visibility = View.GONE
+            !prefs.getBoolean("moduleOn", true) -> hideFix()
             !active -> showFix("打开无障碍设置") {
                 try {
                     startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                 } catch (_: Throwable) {
                 }
             }
-            else -> fixButton?.visibility = View.GONE
+            else -> hideFix()
         }
     }
 
@@ -549,7 +574,18 @@ class SettingsActivity : Activity() {
                         st.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：$msg"
                         st.announceForAccessibility(msg)
                         if (ok) checkResult(getResultExtras(false))
-                        else showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this@SettingsActivity) }
+                        else {
+                            val kind = io.github.doubaoa11y.patch.ApkPatcher.inspect(this@SettingsActivity).kind
+                            if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.ORIGINAL ||
+                                kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.NOT_INSTALLED
+                            ) {
+                                showFix("一键安装与修补豆包", isPatchShortcut = true) {
+                                    startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
+                                }
+                            } else {
+                                showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this@SettingsActivity) }
+                            }
+                        }
                     } else if (ok && cmd != null) {
                         // 复制、保存日志这类命令：结果用对话框显示，读屏会读出来
                         if (!isFinishing) AlertDialog.Builder(this@SettingsActivity)

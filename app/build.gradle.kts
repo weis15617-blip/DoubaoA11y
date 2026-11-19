@@ -46,4 +46,8 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+    implementation("com.android.tools.build:apksig:8.5.0")
+    implementation("io.github.reandroid:ARSCLib:1.4.0") {
+        exclude(group = "xmlpull", module = "xmlpull")
+    }
 }

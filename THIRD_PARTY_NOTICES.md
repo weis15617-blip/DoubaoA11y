@@ -49,6 +49,27 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 `gradlew`、`gradlew.bat`、`gradle/wrapper/` 来自 Gradle，Apache License 2.0。
 
+## LSPatch 运行时资产
+
+`app/src/main/assets/lspatch/` 下的 `loader.dex`、`metaloader.dex`、`so/arm64-v8a/liblspatch.so` 和 `so/armeabi-v7a/liblspatch.so` 取自 JingMatrix/LSPatch v1.2-492 官方发布包，用于本应用内置的本地免 Root 集成修补功能。
+
+- 项目：https://github.com/JingMatrix/LSPatch （基于 LSPosed/LSPatch）
+- 许可：GNU General Public License v3.0（GPL-3.0）
+
+## apksig
+
+`com.android.tools.build:apksig` 来自 Android Open Source Project，用于本地修补后对 APK 进行签名校验与重签名。
+
+- 项目：https://android.googlesource.com/platform/tools/apksig
+- 许可：Apache License 2.0
+
+## ARSCLib
+
+`io.github.reandroid:ARSCLib` 用于在本地修补时解析和修改二进制 `AndroidManifest.xml`。
+
+- 项目：https://github.com/REAndroid/ARSCLib
+- 许可：Apache License 2.0
+
 ## 豆包输入法
 
 本项目不包含豆包输入法的任何代码、图片或资源。代码里出现的类名、方法名、资源 id 只用于定位要 hook 的位置。“豆包”“豆包输入法”是其权利人的商标。
