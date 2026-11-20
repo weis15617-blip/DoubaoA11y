@@ -202,14 +202,49 @@ object ServiceHooks {
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 try {
-                    handle(intent)
                     val cmd = intent.getStringExtra(ConfigSpec.EXTRA_CMD)
+                    if (cmd == ConfigSpec.CMD_NATIVE_BACKUP || cmd == ConfigSpec.CMD_NATIVE_RESTORE) {
+                        val token = intent.getStringExtra(ConfigSpec.EXTRA_NATIVE_TOKEN).orEmpty()
+                        val xferUri = intent.getStringExtra(ConfigSpec.EXTRA_NATIVE_URI)
+                            ?.takeIf { it.isNotEmpty() }
+                            ?.let { android.net.Uri.parse(it) }
+                            ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+                        val includeClipboard = intent.getBooleanExtra(ConfigSpec.EXTRA_NATIVE_INCLUDE_CLIPBOARD, false)
+                        val pending = goAsync()
+                        Thread({
+                            try {
+                                val res = if (cmd == ConfigSpec.CMD_NATIVE_BACKUP) {
+                                    NativeBackup.exportBackup(ctx, token, xferUri, includeClipboard)
+                                } else {
+                                    NativeBackup.stageRestore(ctx, token, xferUri)
+                                }
+                                pending.resultCode = Activity.RESULT_OK
+                                pending.resultData = res
+                                pending.setResultExtras(android.os.Bundle().apply {
+                                    putBoolean("nativeOk", true)
+                                })
+                            } catch (t: Throwable) {
+                                L.e("豆包原生备份/恢复失败（cmd=$cmd）", t)
+                                pending.resultCode = Activity.RESULT_CANCELED
+                                pending.resultData = t.message ?: t.javaClass.simpleName
+                                pending.setResultExtras(android.os.Bundle().apply {
+                                    putBoolean("nativeOk", false)
+                                })
+                            } finally {
+                                pending.finish()
+                            }
+                        }, "DoubaoNativeBackup").start()
+                        return
+                    }
+                    handle(intent)
                     val msg = when (cmd) {
                         ConfigSpec.CMD_EDIT_ADD -> EditHooks.setToolbar(true)
                         ConfigSpec.CMD_EDIT_REMOVE -> EditHooks.setToolbar(false)
                         ConfigSpec.CMD_LOG_COPY -> LogStore.copy(ctx)
                         ConfigSpec.CMD_LOG_SAVE -> LogStore.save(ctx)
                         ConfigSpec.CMD_LOG_CLEAR -> LogStore.clear()
+                        ConfigSpec.CMD_NATIVE_SCAN -> NativeBackup.scanDataTree(ctx)
+                        ConfigSpec.CMD_NATIVE_RESTORE_STATUS -> NativeBackup.readRestoreStatus(ctx)
                         else -> null
                     }
                     if (isOrderedBroadcast) {

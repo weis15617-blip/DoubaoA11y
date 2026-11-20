@@ -23,12 +23,16 @@ object SettingsBackup {
         val warnings: List<String> = emptyList()) : Closeable {
         override fun close() { archive?.close() }
     }
-    fun detach(a: SettingsActivity) { dialogs.remove(a)?.dismiss() }
+    fun detach(a: SettingsActivity) {
+        dialogs.remove(a)?.dismiss()
+        NativeBackupUi.detach(a)
+    }
     fun fill(a: SettingsActivity, root: LinearLayout) {
         root.addView(a.heading("备份与恢复"))
         root.addView(a.note("完整 ZIP 包含设置、自定义解释词、图标状态和导入音频。日志、调试和使用须知记录不备份。社区 ZIP 只恢复兼容设置和音频，不转换其解释词。"))
         root.addView(a.button("导出完整备份（ZIP，含导入音频）") { pick(a, EXPORT_ZIP) })
         root.addView(a.button("恢复备份（ZIP）") { pick(a, IMPORT) })
+        NativeBackupUi.fill(a, root)
     }
     private fun pick(a: SettingsActivity, code: Int) {
         try {
@@ -41,6 +45,7 @@ object SettingsBackup {
         } catch (_: Throwable) { a.toast("无法打开系统文件选择器") }
     }
     fun onResult(a: SettingsActivity, code: Int, result: Int, uri: Uri?): Boolean {
+        if (NativeBackupUi.onResult(a, code, result, uri)) return true
         if (code !in setOf(IMPORT, EXPORT_ZIP)) return false
         if (result != Activity.RESULT_OK || uri == null) return true
         if (code != IMPORT) {

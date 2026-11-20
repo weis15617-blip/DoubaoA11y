@@ -57,14 +57,85 @@ class SettingsProvider : ContentProvider() {
                     }
                 }
             }
+            "openNativeBackupWriteFd" -> Bundle().apply {
+                val f = xferFile(ctx, arg.orEmpty()) ?: throw IllegalArgumentException("无效传输令牌")
+                f.parentFile?.mkdirs()
+                putParcelable(
+                    "fd",
+                    android.os.ParcelFileDescriptor.open(
+                        f,
+                        android.os.ParcelFileDescriptor.MODE_READ_WRITE or
+                            android.os.ParcelFileDescriptor.MODE_CREATE or
+                            android.os.ParcelFileDescriptor.MODE_TRUNCATE
+                    )
+                )
+            }
+            "openNativeBackupReadFd" -> Bundle().apply {
+                val f = xferFile(ctx, arg.orEmpty()) ?: throw IllegalArgumentException("无效传输令牌")
+                if (!f.isFile) throw IllegalStateException("未找到待恢复的中转文件")
+                putParcelable(
+                    "fd",
+                    android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+                )
+            }
             else -> throw IllegalArgumentException("不支持的设置操作")
         }
         } finally { Binder.restoreCallingIdentity(identity) }
+    }
+    override fun openFile(uri: Uri, mode: String): android.os.ParcelFileDescriptor? {
+        val ctx = context ?: return null
+        val uid = Binder.getCallingUid()
+        val allowed = uid == Process.myUid() ||
+            ctx.packageManager.getPackagesForUid(uid)?.contains(ConfigSpec.TARGET_PACKAGE) == true
+        if (!allowed) throw SecurityException("不允许访问模块中转文件")
+        val segments = uri.pathSegments
+        if (segments.size != 2 || segments[0] != "native_xfer") {
+            throw IllegalArgumentException("无效中转路径")
+        }
+        val f = xferFile(ctx, segments[1]) ?: throw IllegalArgumentException("无效传输令牌")
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            val isWrite = mode.contains('w')
+            if (isWrite) {
+                f.parentFile?.mkdirs()
+                android.os.ParcelFileDescriptor.open(
+                    f,
+                    android.os.ParcelFileDescriptor.MODE_READ_WRITE or
+                        android.os.ParcelFileDescriptor.MODE_CREATE or
+                        android.os.ParcelFileDescriptor.MODE_TRUNCATE
+                )
+            } else {
+                if (!f.isFile) throw java.io.FileNotFoundException("未找到待恢复的中转文件")
+                android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity)
+        }
     }
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = null
     override fun getType(uri: Uri): String? = null
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?) = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
-    companion object { val URI: Uri = Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config") }
+    companion object {
+        val URI: Uri = Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config")
+        private val TOKEN_RE = Regex("^[a-f0-9]{16,64}$")
+
+        fun xferUri(token: String): Uri =
+            Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/native_xfer/$token")
+
+        fun xferFile(ctx: Context, token: String): java.io.File? {
+            if (!TOKEN_RE.matches(token)) return null
+            return java.io.File(java.io.File(ctx.cacheDir, "native_backup_xfer"), "$token.zip")
+        }
+
+        fun cleanupXfer(ctx: Context, token: String? = null) {
+            val dir = java.io.File(ctx.cacheDir, "native_backup_xfer")
+            if (token != null) {
+                xferFile(ctx, token)?.delete()
+            } else {
+                dir.deleteRecursively()
+            }
+        }
+    }
 }

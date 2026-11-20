@@ -36,6 +36,14 @@ object ConfigSpec {
     const val CMD_LOG_COPY = "logCopy"
     const val CMD_LOG_SAVE = "logSave"
     const val CMD_LOG_CLEAR = "logClear"
+    /** 豆包原生设置离线备份/恢复 */
+    const val CMD_NATIVE_SCAN = "nativeScan"
+    const val CMD_NATIVE_BACKUP = "nativeBackup"
+    const val CMD_NATIVE_RESTORE = "nativeRestore"
+    const val CMD_NATIVE_RESTORE_STATUS = "nativeRestoreStatus"
+    const val EXTRA_NATIVE_TOKEN = "nativeToken"
+    const val EXTRA_NATIVE_URI = "nativeUri"
+    const val EXTRA_NATIVE_INCLUDE_CLIPBOARD = "nativeIncludeClipboard"
     /** 自定义解释词：每行“字<TAB>词”，读成“字，词的字” */
     const val EXTRA_CUSTOM_WORDS = "customWords"
 
