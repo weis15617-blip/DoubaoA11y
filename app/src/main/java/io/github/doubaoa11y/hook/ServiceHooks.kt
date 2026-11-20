@@ -16,7 +16,8 @@ object ServiceHooks {
     const val CLS = "com.bytedance.android.doubaoime.ImeService"
 
     private var initialized = false
-    private var appContext: Context? = null
+    internal var appContext: Context? = null
+        private set
     private var editorIdentity: String? = null
 
     fun install(cl: ClassLoader) {
@@ -28,7 +29,8 @@ object ServiceHooks {
         Hooker.method(c, "onStartInputView", arrayOf(EditorInfo::class.java, Boolean::class.javaPrimitiveType!!),
             SafeHook("onStartInputView", after = { p ->
                 val ei = p.args[0] as? EditorInfo
-                appContext?.let { Config.pull(it) }
+                val pulled = appContext?.let { Config.pull(it) } == true
+                if (pulled) ToolbarInject.refreshToolbar()
                 EditOptions.reset()
                 EditActions.onWindowHidden()
                 val identity = "${ei?.packageName}/${ei?.fieldId}/${ei?.inputType}"
@@ -219,6 +221,7 @@ object ServiceHooks {
                             putBoolean("active", VirtualKeys.enabled)
                             putBoolean("sync_upperOperation", Config.b("upperOperation"))
                             putBoolean("sync_screenToolbar", Config.b("screenToolbar"))
+                            putBoolean("sync_editToolbar", Config.b("editToolbar"))
                         })
                         L.i("状态：${status(ctx)}")
                     }
@@ -244,12 +247,14 @@ object ServiceHooks {
         if (cmd == ConfigSpec.CMD_RESET) {
             Config.clearDirty("upperOperation")
             Config.clearDirty("screenToolbar")
+            Config.clearDirty("editToolbar")
+            Config.clearDirty("toolbarCustomOrder")
             Config.reset()
         }
         if (ex != null) {
             for (item in ConfigSpec.items) {
                 if (!ex.containsKey(item.key)) continue
-                if (item.key in setOf("upperOperation", "screenToolbar")) {
+                if (item.key in setOf("upperOperation", "screenToolbar", "editToolbar")) {
                     if (cmd == ConfigSpec.CMD_STATUS && Config.isDirty(item.key)) {
                         Config.setFromIme(appContext, item.key, Config.b(item.key))
                         continue
@@ -263,7 +268,16 @@ object ServiceHooks {
                 if (ex.containsKey(item.key)) Config.setInt(item.key, ex.getInt(item.key, item.default))
             }
             for (item in ConfigSpec.strItems) {
-                if (ex.containsKey(item.key)) Config.setStr(item.key, ex.getString(item.key).orEmpty().take(16000))
+                if (!ex.containsKey(item.key)) continue
+                if (item.key == "toolbarCustomOrder") {
+                    if (cmd == ConfigSpec.CMD_STATUS && Config.isDirty(item.key)) {
+                        Config.setStrFromIme(appContext, item.key, Config.s(item.key))
+                        continue
+                    } else if (cmd != ConfigSpec.CMD_STATUS) {
+                        Config.clearDirty(item.key)
+                    }
+                }
+                Config.setStr(item.key, ex.getString(item.key).orEmpty().take(16000))
             }
             if (ex.containsKey(ConfigSpec.EXTRA_CUSTOM_WORDS)) Config.setCustomWords(ex.getString(ConfigSpec.EXTRA_CUSTOM_WORDS) ?: "")
         }
@@ -273,6 +287,7 @@ object ServiceHooks {
         A11yState.refresh("设置变化")
         FullscreenMode.refresh("设置变化")
         ModuleEntries.toolbar()
+        ToolbarInject.refreshToolbar()
         Sound.onConfigChanged()
         if (!FullscreenMode.wanted) EditOptions.onKeyboardHidden()
         if (!A11yState.moduleOn || Config.b("speakByReader")) Speaker.stop()
@@ -301,11 +316,12 @@ object ServiceHooks {
             ""
         }
         val on = when {
-            !A11yState.moduleOn -> "模块总开关已关，豆包输入法保持原样"
+            !A11yState.moduleOn -> "模块总开关已关"
             VirtualKeys.enabled -> "模块已生效"
-            else -> "模块已加载，但没有接管键盘（读屏没开）"
+            else -> "模块未接管键盘（读屏没开）"
         }
-        return "$on。${A11yState.describeShort()}。${if (Config.fullscreen) FullscreenMode.status() else ""}。$ver"
+        val tail = if (ver.isNotEmpty()) "。$ver" else "。"
+        return "$on。${A11yState.describeShort()}$tail"
     }
 
     fun status(ctx: Context): String =

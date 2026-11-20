@@ -188,7 +188,7 @@ object PatchWizardPage {
             }
 
             st.kind == ApkPatcher.PatchKind.LOCAL_INTEGRATED -> {
-                val needSync = st.embeddedModuleVersion != ConfigSpec.MODULE_VERSION_CODE
+                val needSync = !st.embeddedModuleMatchesCurrent
                 if (needSync) {
                     val preparedHot = prepared?.takeIf { it.isHotUpdate }
                     if (preparedHot != null) {
@@ -208,8 +208,8 @@ object PatchWizardPage {
                     } else {
                         setSummary(
                             h,
-                            "检测到豆包输入法（${st.versionName}）使用的是旧版内嵌模块，当前模块已升级到 ${ConfigSpec.MODULE_VERSION_NAME}。\n\n" +
-                                "点击下方按钮可一键同步新版模块并覆盖安装，无需卸载豆包、不丢词库和登录状态。",
+                            "检测到豆包输入法（${st.versionName}）里集成的模块与当前安装的模块（${ConfigSpec.MODULE_VERSION_NAME}）不一致。\n\n" +
+                                "点击下方按钮可一键同步当前模块并覆盖安装，无需卸载豆包、不丢词库和登录状态。",
                             announce
                         )
                         setPrimary(h, "一键同步新版模块到豆包") {

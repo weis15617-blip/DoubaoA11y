@@ -42,6 +42,7 @@ object ApkPatcher {
     private const val MODULE_DIR_PATH = "assets/lspatch/modules/"
     private const val PROXY_FACTORY = "org.lsposed.lspatch.metaloader.LSPAppComponentFactoryStub"
     private const val EMBEDDED_VER_ENTRY = "assets/doubaoa11y_embedded_version.txt"
+    private const val EMBEDDED_FP_ENTRY = "assets/doubaoa11y_embedded_fp.txt"
 
     private val LSPATCH_SO_ASSETS = listOf(
         "assets/lspatch/so/arm64-v8a/liblspatch.so",
@@ -76,6 +77,7 @@ object ApkPatcher {
         val baseApk: File? = null,
         val splitApks: List<File> = emptyList(),
         val embeddedModuleVersion: Int = -1,
+        val embeddedModuleMatchesCurrent: Boolean = false,
         val signedByLocalKey: Boolean = false
     )
 
@@ -153,6 +155,8 @@ object ApkPatcher {
         var hasLspatchConfig = false
         var useManager = true
         var embeddedVer = -1
+        var embeddedMatches = false
+        val currentFp = computeDexFingerprint(File(context.applicationInfo.sourceDir))
         if (baseApk.isFile) {
             try {
                 ZipFile(baseApk).use { zf ->
@@ -165,7 +169,12 @@ object ApkPatcher {
                     }
                     val modEntry = zf.getEntry("$MODULE_DIR_PATH${context.packageName}.apk")
                     if (modEntry != null) {
-                        embeddedVer = readEmbeddedModuleVersion(zf, modEntry)
+                        val probe = probeEmbeddedModule(zf, modEntry)
+                        embeddedVer = probe.first
+                        val embeddedFp = probe.second
+                        embeddedMatches = currentFp != null && embeddedFp != null &&
+                            currentFp == embeddedFp &&
+                            (embeddedVer == -1 || embeddedVer == ConfigSpec.MODULE_VERSION_CODE)
                     }
                 }
             } catch (_: Throwable) {
@@ -186,6 +195,7 @@ object ApkPatcher {
             baseApk = baseApk,
             splitApks = splitApks,
             embeddedModuleVersion = embeddedVer,
+            embeddedModuleMatchesCurrent = embeddedMatches,
             signedByLocalKey = signedByLocal
         )
     }
@@ -496,18 +506,29 @@ object ApkPatcher {
      */
     private fun buildSlimModuleApk(context: Context, outFile: File) {
         val selfApk = File(context.applicationInfo.sourceDir)
+        val selfFp = computeDexFingerprint(selfApk) ?: ""
         ZipFile(selfApk).use { zf ->
             AlignedZipWriter(outFile).use { out ->
                 val entries = zf.entries()
                 while (entries.hasMoreElements()) {
                     val e = entries.nextElement()
-                    if (e.name.startsWith(LSPATCH_DIR) || e.name == EMBEDDED_VER_ENTRY) continue
+                    if (e.name.startsWith(LSPATCH_DIR) ||
+                        e.name == EMBEDDED_VER_ENTRY ||
+                        e.name == EMBEDDED_FP_ENTRY ||
+                        isSignatureEntry(e.name)
+                    ) continue
                     out.copyEntry(zf, e)
                 }
                 out.writeDeflatedBytes(
                     EMBEDDED_VER_ENTRY,
                     ConfigSpec.MODULE_VERSION_CODE.toString().toByteArray(Charsets.UTF_8)
                 )
+                if (selfFp.isNotEmpty()) {
+                    out.writeDeflatedBytes(
+                        EMBEDDED_FP_ENTRY,
+                        selfFp.toByteArray(Charsets.UTF_8)
+                    )
+                }
             }
         }
     }
@@ -643,24 +664,65 @@ object ApkPatcher {
         return LocalKeystore.sha256(der)
     }
 
-    /** 从豆包内嵌的模块 APK 中读取写入的版本号 */
-    private fun readEmbeddedModuleVersion(outerZip: ZipFile, modEntry: ZipEntry): Int {
+    /** 计算 APK 中所有顶层 classes*.dex 的组合 SHA-256 指纹，用于精准判断是否为同一模块构建 */
+    fun computeDexFingerprint(apkFile: File): String? {
+        if (!apkFile.isFile) return null
         return try {
-            // 模块 APK 体积较小（约 1~2MB），用临时流扫描内部条目
+            ZipFile(apkFile).use { computeDexFingerprint(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun computeDexFingerprint(zf: ZipFile): String? {
+        val dexPattern = Regex("""^classes\d*\.dex$""")
+        val dexNames = mutableListOf<String>()
+        val entries = zf.entries()
+        while (entries.hasMoreElements()) {
+            val name = entries.nextElement().name
+            if (dexPattern.matches(name)) dexNames.add(name)
+        }
+        if (dexNames.isEmpty()) return null
+        dexNames.sort()
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(32 * 1024)
+        for (name in dexNames) {
+            md.update(name.toByteArray(Charsets.UTF_8))
+            md.update(0)
+            val e = zf.getEntry(name) ?: continue
+            zf.getInputStream(e).use { input ->
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    md.update(buf, 0, n)
+                }
+            }
+        }
+        return toHex(md.digest())
+    }
+
+    /** 从豆包内嵌的模块 APK 中读取写入的版本号与 DEX 指纹 */
+    private fun probeEmbeddedModule(outerZip: ZipFile, modEntry: ZipEntry): Pair<Int, String?> {
+        return try {
             val tmp = File.createTempFile("mod_probe_", ".apk")
             try {
                 outerZip.getInputStream(modEntry).use { input ->
                     tmp.outputStream().use { input.copyTo(it) }
                 }
                 ZipFile(tmp).use { inner ->
-                    val ve = inner.getEntry(EMBEDDED_VER_ENTRY) ?: return -1
-                    inner.getInputStream(ve).bufferedReader().use { it.readText().trim().toIntOrNull() ?: -1 }
+                    val ver = inner.getEntry(EMBEDDED_VER_ENTRY)?.let { ve ->
+                        inner.getInputStream(ve).bufferedReader().use { it.readText().trim().toIntOrNull() }
+                    } ?: -1
+                    val fp = inner.getEntry(EMBEDDED_FP_ENTRY)?.let { fe ->
+                        inner.getInputStream(fe).bufferedReader().use { it.readText().trim() }.ifEmpty { null }
+                    } ?: computeDexFingerprint(inner)
+                    ver to fp
                 }
             } finally {
                 tmp.delete()
             }
         } catch (_: Throwable) {
-            -1
+            -1 to null
         }
     }
 

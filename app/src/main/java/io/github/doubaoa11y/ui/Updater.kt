@@ -13,6 +13,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import io.github.doubaoa11y.ConfigSpec
@@ -20,6 +23,8 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 检查更新：读 GitHub 仓库最新的 Release，有新版就下载模块 apk，用系统安装器安装。
@@ -52,16 +57,72 @@ object Updater {
         status.announceForAccessibility(msg)
     }
 
+    private fun buildProgressDialog(
+        act: Activity,
+        title: String,
+        initialMsg: String,
+        indeterminate: Boolean,
+        onCancel: () -> Unit
+    ): Triple<AlertDialog, TextView, ProgressBar> {
+        val pad = (20 * act.resources.displayMetrics.density).toInt()
+        val box = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad / 2)
+        }
+        val msgView = TextView(act).apply {
+            text = initialMsg
+            textSize = 16f
+            isFocusable = true
+            setPadding(0, 0, 0, pad / 2)
+        }
+        val bar = ProgressBar(act, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = indeterminate
+            max = 100
+            progress = 0
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        box.addView(msgView)
+        box.addView(bar)
+        val dialog = AlertDialog.Builder(act)
+            .setTitle(title)
+            .setView(box)
+            .setCancelable(false)
+            .setNegativeButton("取消") { d, _ ->
+                d.dismiss()
+                onCancel()
+            }
+            .create()
+        dialog.show()
+        return Triple(dialog, msgView, bar)
+    }
+
     fun check(act: Activity, status: TextView) {
         say(act, status, "正在检查更新…")
+        val cancelled = AtomicBoolean(false)
+        val connRef = AtomicReference<HttpURLConnection?>(null)
+        val (dialog, _, _) = buildProgressDialog(
+            act = act,
+            title = "检查更新",
+            initialMsg = "正在检查更新，请稍候…",
+            indeterminate = true
+        ) {
+            cancelled.set(true)
+            say(act, status, "已取消检查更新")
+            Thread { try { connRef.getAndSet(null)?.disconnect() } catch (_: Throwable) {} }.start()
+        }
+
         Thread {
             val r = try {
-                fetch()
+                fetch(cancelled, connRef)
             } catch (t: Throwable) {
                 null
             }
             main.post {
-                if (act.isFinishing) return@post
+                try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
+                if (act.isFinishing || cancelled.get()) return@post
                 when {
                     r == null -> AlertDialog.Builder(act)
                         .setTitle("检查更新失败")
@@ -83,13 +144,15 @@ object Updater {
         }.start()
     }
 
-    private fun fetch(): Release {
+    private fun fetch(cancelled: AtomicBoolean, connRef: AtomicReference<HttpURLConnection?>): Release {
         val c = URL(API).openConnection() as HttpURLConnection
+        connRef.set(c)
         c.connectTimeout = 15000
         c.readTimeout = 15000
         c.setRequestProperty("Accept", "application/vnd.github+json")
         c.setRequestProperty("User-Agent", "DoubaoA11y-updater")
         try {
+            if (cancelled.get()) error("已取消")
             if (c.responseCode != 200) error("HTTP ${c.responseCode}")
             val j = JSONObject(c.inputStream.bufferedReader().readText())
             val assets = j.optJSONArray("assets")
@@ -107,6 +170,7 @@ object Updater {
             }
             return Release(j.optString("tag_name").removePrefix("v"), j.optString("body"), url, size)
         } finally {
+            connRef.compareAndSet(c, null)
             c.disconnect()
         }
     }
@@ -162,16 +226,54 @@ object Updater {
         }
         say(act, status, "正在下载 ${r.version}…")
         val file = File(act.cacheDir, "update.apk")
+        val cancelled = AtomicBoolean(false)
+        val connRef = AtomicReference<HttpURLConnection?>(null)
+        val (dialog, msgView, bar) = buildProgressDialog(
+            act = act,
+            title = "正在下载 ${r.version}",
+            initialMsg = "正在连接下载服务器…",
+            indeterminate = true
+        ) {
+            cancelled.set(true)
+            say(act, status, "已取消下载")
+            Thread {
+                try { connRef.getAndSet(null)?.disconnect() } catch (_: Throwable) {}
+                try { file.delete() } catch (_: Throwable) {}
+            }.start()
+        }
+
         Thread {
             val ok = try {
-                save(r.apkUrl!!, file) { pct -> main.post { status.text = "更新：正在下载 ${r.version}，$pct%" } }
+                save(r.apkUrl!!, file, cancelled, connRef) { pct, done, total ->
+                    main.post {
+                        if (act.isFinishing || cancelled.get()) return@post
+                        if (total > 0) {
+                            bar.isIndeterminate = false
+                            bar.progress = pct
+                            val doneMb = "%.1f".format(done / 1048576.0)
+                            val totalMb = "%.1f".format(total / 1048576.0)
+                            msgView.text = "正在下载 $pct%（$doneMb MB / $totalMb MB）"
+                            status.text = "更新：正在下载 ${r.version}，$pct%"
+                        } else {
+                            bar.isIndeterminate = true
+                            val doneMb = "%.1f".format(done / 1048576.0)
+                            msgView.text = "正在下载（已下载 $doneMb MB）"
+                            status.text = "更新：正在下载 ${r.version}…"
+                        }
+                    }
+                }
                 true
             } catch (t: Throwable) {
                 false
             }
             main.post {
-                if (act.isFinishing) return@post
+                try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
+                if (act.isFinishing || cancelled.get()) {
+                    try { file.delete() } catch (_: Throwable) {}
+                    return@post
+                }
                 if (!ok) {
+                    try { file.delete() } catch (_: Throwable) {}
                     AlertDialog.Builder(act)
                         .setTitle("下载失败")
                         .setMessage("下载中断了。可以再试一次，或者加入QQ群获取最新版。\n$QQ_LINE")
@@ -187,11 +289,19 @@ object Updater {
         }.start()
     }
 
-    private fun save(url: String, out: File, progress: (Int) -> Unit) {
+    private fun save(
+        url: String,
+        out: File,
+        cancelled: AtomicBoolean,
+        connRef: AtomicReference<HttpURLConnection?>,
+        progress: (pct: Int, done: Long, total: Long) -> Unit
+    ) {
         var u = URL(url)
         // GitHub 附件会跳转到另一个域名，HttpURLConnection 跨协议不自动跳，这里手动跟
         repeat(5) {
+            if (cancelled.get()) error("已取消")
             val c = u.openConnection() as HttpURLConnection
+            connRef.set(c)
             c.connectTimeout = 15000
             c.readTimeout = 30000
             c.instanceFollowRedirects = false
@@ -206,27 +316,36 @@ object Updater {
                 val total = c.contentLengthLong
                 var done = 0L
                 var lastPct = -1
+                var lastReportMs = 0L
                 c.inputStream.use { input ->
                     out.outputStream().use { o ->
                         val buf = ByteArray(64 * 1024)
                         while (true) {
+                            if (cancelled.get()) error("已取消")
                             val n = input.read(buf)
                             if (n < 0) break
                             o.write(buf, 0, n)
                             done += n
+                            val now = System.currentTimeMillis()
                             if (total > 0) {
-                                val pct = (done * 100 / total).toInt()
-                                if (pct / 10 != lastPct / 10) {
+                                val pct = (done * 100 / total).toInt().coerceIn(0, 100)
+                                if (pct != lastPct && (pct == 100 || now - lastReportMs >= 150L)) {
                                     lastPct = pct
-                                    progress(pct)
+                                    lastReportMs = now
+                                    progress(pct, done, total)
                                 }
+                            } else if (now - lastReportMs >= 300L) {
+                                lastReportMs = now
+                                progress(0, done, -1L)
                             }
                         }
                     }
                 }
+                if (cancelled.get()) error("已取消")
                 if (total > 0 && done != total) error("没下完")
                 return
             } finally {
+                connRef.compareAndSet(c, null)
                 c.disconnect()
             }
         }
