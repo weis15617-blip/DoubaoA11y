@@ -1,8 +1,13 @@
-name: Sync Update Manifest
+name: Sync Update Manifest & Purge CDN
 
 on:
   release:
     types: [published, edited]
+  push:
+    branches: [main]
+    paths:
+      - 'data/update.json'
+      - 'data/sponsors.json'
   workflow_dispatch:
 
 permissions:
@@ -13,12 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
+        if: github.event_name != 'push'
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
 
       - name: Generate data/update.json from latest release
+        if: github.event_name != 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -96,6 +103,7 @@ jobs:
           PY
 
       - name: Commit and push if changed
+        if: github.event_name != 'push'
         run: |
           if git diff --quiet data/update.json; then
             echo "data/update.json unchanged"
@@ -106,3 +114,13 @@ jobs:
           git add data/update.json
           git commit -m "chore: 自动同步 data/update.json"
           git push origin main
+
+      - name: Purge jsDelivr CDN cache
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          for path in data/update.json data/sponsors.json; do
+            echo "Purging jsDelivr cache for $path"
+            curl -fsSL --max-time 15 "https://purge.jsdelivr.net/gh/${REPO}@main/${path}" || true
+            echo ""
+          done
