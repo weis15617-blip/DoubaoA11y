@@ -34,8 +34,22 @@ class SettingsProvider : ContentProvider() {
                 putBoolean("saved", p.edit().putBoolean("upperOperation", extras!!.getBoolean("upperOperation")).commit())
             }
             "setToolbar" -> Bundle().apply {
-                require(extras?.get("screenToolbar") is Boolean)
-                putBoolean("saved", p.edit().putBoolean("screenToolbar", extras!!.getBoolean("screenToolbar")).commit())
+                val ed = p.edit()
+                var any = false
+                if (extras?.get("screenToolbar") is Boolean) {
+                    ed.putBoolean("screenToolbar", extras.getBoolean("screenToolbar"))
+                    any = true
+                }
+                if (extras?.get("editToolbar") is Boolean) {
+                    ed.putBoolean("editToolbar", extras.getBoolean("editToolbar"))
+                    any = true
+                }
+                if (extras?.get("toolbarCustomOrder") is String) {
+                    ed.putString("toolbarCustomOrder", extras.getString("toolbarCustomOrder").orEmpty().take(4000))
+                    any = true
+                }
+                require(any)
+                putBoolean("saved", ed.commit())
             }
             "speak" -> Bundle().apply {
                 val text = extras?.getString("text").orEmpty()
@@ -77,6 +91,32 @@ class SettingsProvider : ContentProvider() {
                     "fd",
                     android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
                 )
+            }
+            "tatansPassThrough" -> {
+                val rect = android.graphics.Rect(
+                    extras?.getInt("left", 0) ?: 0,
+                    extras?.getInt("top", 0) ?: 0,
+                    extras?.getInt("right", 0) ?: 0,
+                    extras?.getInt("bottom", 0) ?: 0
+                )
+                val token = extras?.getBinder("token")
+                val disconnect = extras?.getBoolean("disconnect", false) == true
+                val suppress = extras?.getBoolean("suppress", false) == true
+                ReaderBridge.tatansPassThrough(ctx, rect, token, disconnect, suppress)
+            }
+            "talkmanPassThrough" -> {
+                val rect = android.graphics.Rect(
+                    extras?.getInt("left", 0) ?: 0,
+                    extras?.getInt("top", 0) ?: 0,
+                    extras?.getInt("right", 0) ?: 0,
+                    extras?.getInt("bottom", 0) ?: 0
+                )
+                ReaderBridge.talkmanPassThrough(ctx, rect)
+            }
+            "readerControl" -> {
+                val pkg = extras?.getString("pkg").orEmpty()
+                val on = extras?.getBoolean("on", true) != false
+                ReaderBridge.readerControl(ctx, pkg, on)
             }
             else -> throw IllegalArgumentException("不支持的设置操作")
         }

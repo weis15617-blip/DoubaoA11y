@@ -32,7 +32,8 @@ class GestureLayer(ctx: Context) : View(ctx) {
     var onHeightChanged: (() -> Unit)? = null
 
     private val main = Handler(Looper.getMainLooper())
-    private var twoTapAt = 0L
+    private var twoTapPending = false
+    private var twoTapUpAt = 0L
     private var twoTapX = 0f
     private var twoTapY = 0f
 
@@ -139,23 +140,79 @@ class GestureLayer(ctx: Context) : View(ctx) {
             else -> 260L
         }
 
+    /** 双指滑动阈值下限 18dp，避免双指点按时轻微抖动误判成双指滑动 */
+    private val twoSlideSlop: Float get() = maxOf(slop, 18f * density)
+    /** 双指双击中心点容差（至少 80dp），防止两拍落点略有偏移被拒 */
+    private val twoTapRadius: Float get() = maxOf(slop * 4f, 80f * density)
+    /** 双指双击允许的空中间隔（第 1 拍抬手到第 2 拍按下） */
+    private val twoDoubleGapMs: Long get() = TwoFingerTapPolicy.doubleGapMs(sensitivity)
+
     // ---------------- 直接触摸 ----------------
 
     private var downX = 0f
     private var downY = 0f
     private var downAt = 0L
+    private var twoDownAt = 0L
+    private var twoUpX = 0f
+    private var twoUpY = 0f
     private var tracking = false
     private var fingers = 1
     private var maxFingers = 1
     private var fired = false
 
-    /** 拖动状态：上一次拖动的位置和时间 */
+    /** 拖动/滑动分离状态：有拖动动作绑定时先挂起普通滑动，短划抬手走滑动，按住进入拖动 */
     private var dragging = false
     private var dragX = 0f
     private var dragY = 0f
-    private var dragAt = 0L
+    private var pendingSlideSlot: Int? = null
+    private var pendingSlideHow = ""
+    private var pendingDragSlot: Int? = null
+    private var currentDragSlot: Int? = null
+    private var currentDragHow = ""
+    private var dragToken = 0L
 
-    /** 等待判定的单击（等看有没有第二次点击） */
+    private val dragStartRunner = Runnable {
+        val slot = pendingDragSlot ?: return@Runnable
+        if (!tracking || dragging) return@Runnable
+        val how = if (maxFingers >= 2) "双指拖动" else "单指拖动"
+        pendingSlideSlot = null
+        pendingDragSlot = null
+        dragging = true
+        fired = true
+        currentDragSlot = slot
+        currentDragHow = how
+        fire(slot, how)
+        scheduleDragRepeat(dragToken)
+    }
+
+    private var dragRepeatRunner: Runnable? = null
+
+    private fun scheduleDragRepeat(tok: Long) {
+        dragRepeatRunner?.let { main.removeCallbacks(it) }
+        val gap = Config.i("fsDragMs").coerceIn(100, 2000).toLong()
+        val r = Runnable {
+            if (tok != dragToken || !tracking || !dragging) return@Runnable
+            val slot = currentDragSlot ?: return@Runnable
+            if (GestureMap.actionOf(slot) != ConfigSpec.ACT_NONE) {
+                fire(slot, currentDragHow)
+            }
+            scheduleDragRepeat(tok)
+        }
+        dragRepeatRunner = r
+        main.postDelayed(r, gap)
+    }
+
+    private fun stopDragTimers() {
+        dragToken++
+        main.removeCallbacks(dragStartRunner)
+        dragRepeatRunner?.let { main.removeCallbacks(it) }
+        dragRepeatRunner = null
+        pendingSlideSlot = null
+        pendingDragSlot = null
+        currentDragSlot = null
+    }
+
+    /** 等待判定的单指单击（等看有没有第二次点击） */
     private var tapPending = false
 
     /** 单击已经执行过了（“抬手立即执行”的那条路），后面再来一次点击就是双击 */
@@ -170,7 +227,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
         tapFired = false
     }
 
-    /** 等双击窗口过完、确认不是双击之后才执行的那一下单击 */
+    /** 等双击窗口过完、确认不是双击之后才执行的那一下单指单击 */
     private val singleRunner = Runnable {
         if (tapPending && !tapFired) {
             tapPending = false
@@ -178,21 +235,69 @@ class GestureLayer(ctx: Context) : View(ctx) {
         }
     }
 
+    /** 等双指双击窗口过完、确认不是双指双击之后才执行的那一下双指单击 */
+    private val twoSingleRunner: Runnable = object : Runnable {
+        override fun run() {
+            if (!twoTapPending) return
+            // 若第二拍的第一根手指刚落屏（<120ms），稍等第二根手指落地，避免双指双击被抢跑
+            if (tracking && maxFingers == 1 && !fired && SystemClock.uptimeMillis() - downAt in 0L..120L) {
+                main.postDelayed(this, 80L)
+                return
+            }
+            twoTapPending = false
+            twoTapUpAt = 0L
+            fire(ConfigSpec.G_DOUBLE_SINGLE_TAP, "双指单击")
+        }
+    }
+
+    /** 仅绑了双指双击时，窗口到期后清掉挂起状态 */
+    private val twoTapExpireRunner: Runnable = object : Runnable {
+        override fun run() {
+            if (!twoTapPending) return
+            if (tracking && maxFingers == 1 && !fired && SystemClock.uptimeMillis() - downAt in 0L..120L) {
+                main.postDelayed(this, 80L)
+                return
+            }
+            twoTapPending = false
+            twoTapUpAt = 0L
+        }
+    }
+
+    private fun cancelTwoTap() {
+        twoTapPending = false
+        twoTapUpAt = 0L
+        main.removeCallbacks(twoSingleRunner)
+        main.removeCallbacks(twoTapExpireRunner)
+    }
+
     /** 一次手势作废（手指划出了手势区、或者被别的层接管）：不执行、不留状态 */
     fun cancelTouch() {
         tracking = false
         fired = false
         dragging = false
+        stopDragTimers()
+        cancelHover()
         cancelTap()
+        cancelTwoTap()
     }
+
+    private fun midX(ev: MotionEvent): Float =
+        if (ev.pointerCount >= 2) (ev.getX(0) + ev.getX(1)) / 2f else ev.x
+
+    private fun midY(ev: MotionEvent): Float =
+        if (ev.pointerCount >= 2) (ev.getY(0) + ev.getY(1)) / 2f else ev.y
 
     fun handleTouch(ev: MotionEvent): Boolean {
         if (!isShown || height <= 0) return false
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                stopDragTimers()
                 downX = ev.x
                 downY = ev.y
                 downAt = ev.eventTime
+                twoDownAt = ev.eventTime
+                twoUpX = ev.x
+                twoUpY = ev.y
                 fingers = 1
                 maxFingers = 1
                 fired = false
@@ -206,79 +311,198 @@ class GestureLayer(ctx: Context) : View(ctx) {
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (!tracking) return false
+                val prevMax = maxFingers
                 fingers = ev.pointerCount
                 if (fingers > maxFingers) maxFingers = fingers
+                if (prevMax < 2 && ev.pointerCount >= 2) {
+                    // 第二根手指刚落屏：以两指中心点重新定锚，避免第一根抬手时 pointerIndex 跳变导致位移炸裂
+                    cancelTap()
+                    // 若正在等待上一拍双指单击，暂停定时但不清 twoTapPending，等本拍抬手判双指双击
+                    main.removeCallbacks(twoSingleRunner)
+                    main.removeCallbacks(twoTapExpireRunner)
+                    if (!fired && pendingSlideSlot != null) stopDragTimers()
+                    val cx = midX(ev)
+                    val cy = midY(ev)
+                    downX = cx
+                    downY = cy
+                    twoUpX = cx
+                    twoUpY = cy
+                    // 两根手指先后落屏通常错开 10~80ms，以第一根落屏时间作为本拍按下起点
+                    twoDownAt = if (ev.eventTime - downAt in 0L..120L) downAt else ev.eventTime
+                }
             }
             MotionEvent.ACTION_MOVE -> {
                 if (!tracking) return false
-                if (fingers < 2) fingers = ev.pointerCount
-                if (fingers > maxFingers) maxFingers = fingers
-                val dx = ev.x - downX
-                val dy = ev.y - downY
-                if (!fired) {
-                    // 先按滑动算：手一划就走，反应快
-                    val slot = if (maxFingers >= 2) GestureMap.doubleSlide(dx, dy, slop)
-                    else GestureMap.singleSlide(dx, dy, slop)
-                    if (slot != null) {
-                        fired = true
+                if (maxFingers >= 2 && ev.pointerCount < 2) {
+                    // 双指手势已抬起一根手指，忽略剩余单指的残余位移，防止 pointer0 切换误触发滑动
+                    return true
+                }
+                val curX = if (maxFingers >= 2) midX(ev) else ev.x
+                val curY = if (maxFingers >= 2) midY(ev) else ev.y
+                if (maxFingers >= 2) {
+                    twoUpX = curX
+                    twoUpY = curY
+                }
+                val moveSlop = if (maxFingers >= 2) twoSlideSlop else slop
+                val dx = curX - downX
+                val dy = curY - downY
+                if (!fired && !dragging && pendingSlideSlot == null) {
+                    val slideSlot = if (maxFingers >= 2) GestureMap.doubleSlide(dx, dy, moveSlop)
+                    else GestureMap.singleSlide(dx, dy, moveSlop)
+                    if (slideSlot != null) {
                         cancelTap()
-                        fire(slot, if (maxFingers >= 2) "双指滑动" else "单指滑动")
-                        dragX = ev.x
-                        dragY = ev.y
-                        dragAt = ev.eventTime
+                        cancelTwoTap()
+                        val dragSlot = GestureMap.dragSlot(maxFingers, dx, dy)
+                        val dragAction = GestureMap.actionOf(dragSlot)
+                        val how = if (maxFingers >= 2) "双指滑动" else "单指滑动"
+                        if (TwoFingerTapPolicy.shouldDeferSlideForDrag(Config.b("fsDrag"), dragAction)) {
+                            // 该方向开启了拖动：先挂起普通滑动，短划抬手才走普通滑动，按住不放则直接进入拖动
+                            pendingSlideSlot = slideSlot
+                            pendingSlideHow = how
+                            pendingDragSlot = dragSlot
+                            dragX = curX
+                            dragY = curY
+                            dragToken++
+                            val enterMs = TwoFingerTapPolicy.dragEnterDelayMs(Config.i("fsDragMs"))
+                            main.removeCallbacks(dragStartRunner)
+                            main.postDelayed(dragStartRunner, enterMs)
+                        } else {
+                            fired = true
+                            fire(slideSlot, how)
+                        }
                     }
                     return true
                 }
-                // 已经做过一次，手指还按着继续拖：按间隔重复执行（拖动手势）
-                if (!Config.b("fsDrag")) return true
-                val mx = ev.x - dragX
-                val my = ev.y - dragY
-                if (kotlin.math.abs(mx) <= slop && kotlin.math.abs(my) <= slop) return true
-                val gap = Config.i("fsDragMs").coerceIn(100, 2000)
-                if (ev.eventTime - dragAt < gap) return true
-                val slot = GestureMap.dragSlot(maxFingers, mx, my)
-                dragX = ev.x
-                dragY = ev.y
-                dragAt = ev.eventTime
-                dragging = true
-                fire(slot, if (maxFingers >= 2) "双指拖动" else "单指拖动")
+                if (pendingSlideSlot != null && !dragging) {
+                    val mx = curX - dragX
+                    val my = curY - dragY
+                    if (kotlin.math.abs(mx) > moveSlop || kotlin.math.abs(my) > moveSlop) {
+                        val nextDrag = GestureMap.dragSlot(maxFingers, mx, my)
+                        if (GestureMap.actionOf(nextDrag) != ConfigSpec.ACT_NONE) {
+                            pendingDragSlot = nextDrag
+                        }
+                        dragX = curX
+                        dragY = curY
+                    }
+                    return true
+                }
+                if (dragging) {
+                    val mx = curX - dragX
+                    val my = curY - dragY
+                    if (kotlin.math.abs(mx) > moveSlop || kotlin.math.abs(my) > moveSlop) {
+                        val nextDrag = GestureMap.dragSlot(maxFingers, mx, my)
+                        if (GestureMap.actionOf(nextDrag) != ConfigSpec.ACT_NONE) {
+                            currentDragSlot = nextDrag
+                        }
+                        dragX = curX
+                        dragY = curY
+                    }
+                }
             }
             MotionEvent.ACTION_POINTER_UP -> {
                 if (!tracking) return false
+                if (maxFingers >= 2 && ev.pointerCount >= 2) {
+                    twoUpX = midX(ev)
+                    twoUpY = midY(ev)
+                }
                 fingers = (ev.pointerCount - 1).coerceAtLeast(1)
+                if (maxFingers >= 2 && fingers < 2) {
+                    if (dragging) {
+                        stopDragTimers()
+                        dragging = false
+                        fired = true
+                    } else {
+                        val pending = pendingSlideSlot
+                        if (pending != null && !fired) {
+                            val how = pendingSlideHow
+                            stopDragTimers()
+                            fired = true
+                            fire(pending, how)
+                        }
+                    }
+                }
             }
             MotionEvent.ACTION_UP -> {
                 if (!tracking) return false
                 tracking = false
-                val dx = ev.x - downX
-                val dy = ev.y - downY
-                val quick = ev.eventTime - downAt <= tapMaxMs
-                val still = kotlin.math.abs(dx) <= slop && kotlin.math.abs(dy) <= slop
-                if (!fired && !dragging && quick && still) {
+                val pending = pendingSlideSlot
+                val pendingHow = pendingSlideHow
+                val wasDragging = dragging
+                stopDragTimers()
+                dragging = false
+                if (pending != null && !fired && !wasDragging) {
+                    fired = true
+                    fire(pending, pendingHow)
+                } else if (!fired && !wasDragging) {
                     if (maxFingers >= 2) {
                         cancelTap()
-                        if (twoTapAt > 0 && ev.eventTime - twoTapAt <= doubleGapMs &&
-                            kotlin.math.abs(ev.x - twoTapX) <= slop * 3 && kotlin.math.abs(ev.y - twoTapY) <= slop * 3) {
-                            twoTapAt = 0
-                            fire(ConfigSpec.G_DOUBLE_TAP, "双指双击", double = true)
+                        val quick = ev.eventTime - twoDownAt <= tapMaxMs
+                        if (quick) {
+                            onTwoFingerTap(twoUpX, twoUpY, twoDownAt, ev.eventTime)
                         } else {
-                            twoTapAt = ev.eventTime; twoTapX = ev.x; twoTapY = ev.y
+                            cancelTwoTap()
                         }
                     } else {
-                        onSingleTap(ev.x, ev.y, ev.eventTime)
+                        cancelTwoTap()
+                        val dx = ev.x - downX
+                        val dy = ev.y - downY
+                        val quick = ev.eventTime - downAt <= tapMaxMs
+                        val still = kotlin.math.abs(dx) <= slop && kotlin.math.abs(dy) <= slop
+                        if (quick && still) {
+                            onSingleTap(ev.x, ev.y, ev.eventTime)
+                        }
                     }
                 }
                 fired = false
-                dragging = false
             }
             MotionEvent.ACTION_CANCEL -> {
                 tracking = false
                 fired = false
                 dragging = false
+                stopDragTimers()
             }
             else -> return tracking
         }
         return true
+    }
+
+    private fun onTwoFingerTap(x: Float, y: Float, tapDownAt: Long, tapUpAt: Long) {
+        val gap = twoDoubleGapMs
+        if (TwoFingerTapPolicy.isDoubleTap(
+                pending = twoTapPending,
+                firstUpAt = twoTapUpAt,
+                secondDownAt = tapDownAt,
+                dx = x - twoTapX,
+                dy = y - twoTapY,
+                radius = twoTapRadius,
+                gapMs = gap,
+            )
+        ) {
+            cancelTwoTap()
+            fire(ConfigSpec.G_DOUBLE_TAP, "双指双击", double = true)
+            return
+        }
+        val hasSingle = GestureMap.actionOf(ConfigSpec.G_DOUBLE_SINGLE_TAP) != ConfigSpec.ACT_NONE
+        val hasDouble = GestureMap.actionOf(ConfigSpec.G_DOUBLE_TAP) != ConfigSpec.ACT_NONE
+        if (hasSingle && !hasDouble) {
+            cancelTwoTap()
+            fire(ConfigSpec.G_DOUBLE_SINGLE_TAP, "双指单击")
+            return
+        }
+        twoTapPending = true
+        twoTapUpAt = tapUpAt
+        twoTapX = x
+        twoTapY = y
+        main.removeCallbacks(twoSingleRunner)
+        main.removeCallbacks(twoTapExpireRunner)
+        if (hasSingle) {
+            main.postDelayed(twoSingleRunner, gap)
+        } else if (hasDouble) {
+            main.postDelayed(twoTapExpireRunner, gap)
+        } else {
+            twoTapPending = false
+            twoTapUpAt = 0L
+        }
     }
 
     private fun onSingleTap(x: Float, y: Float, at: Long) {
@@ -346,6 +570,14 @@ class GestureLayer(ctx: Context) : View(ctx) {
     private var hoverFired = false
     private var hoverInside = false
 
+    /** 当前是否正在跟踪上半屏手势区的悬停（只有跟踪中的悬停离开才归手势层收尾，绝不吞掉键盘区的抬手） */
+    val isHoverTracking: Boolean get() = hoverInside
+
+    fun cancelHover() {
+        hoverInside = false
+        hoverFired = false
+    }
+
     fun handleHover(ev: MotionEvent): Boolean {
         if (!isShown || height <= 0) return false
         when (ev.actionMasked) {
@@ -370,12 +602,14 @@ class GestureLayer(ctx: Context) : View(ctx) {
                 return true
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
+                if (!hoverInside) return false
                 val wasFired = hoverFired
                 val at = ev.eventTime
                 hoverInside = false
                 hoverFired = false
                 if (!wasFired && at - hoverAt <= 500L) onSingleTap(hoverX, hoverY, at)
             }
+            else -> return false
         }
         return true
     }
@@ -468,6 +702,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
             val navOption = action == ConfigSpec.ACT_PREV_OPTION ||
                 action == ConfigSpec.ACT_NEXT_OPTION || action == ConfigSpec.ACT_RUN_OPTION
             if (!Config.b("fsSpeakAction") && !navOption) Speaker.mute(500)
+            val effectiveAction = if (action == ConfigSpec.ACT_RUN_OPTION) EditOptions.currentAction else action
             val ok = try {
                 GestureMap.run(action)
             } catch (t: Throwable) {
@@ -479,6 +714,8 @@ class GestureLayer(ctx: Context) : View(ctx) {
                 Speaker.unmute()
                 if (Config.b("fsHaptic")) Haptic.tick(2)
                 Speaker.speak(GestureMap.failHint(action))
+            } else if (effectiveAction == ConfigSpec.ACT_VOICE && KeyboardOps.isVoiceActive()) {
+                // 启动语音由 Voice.onStart() 播放用户设置的“语音开始”提示声，不发双击/手势声以免覆盖
             } else if (double) {
                 Sound.play("double")
             } else {

@@ -48,11 +48,11 @@ object CharWords {
         return if (e != t) e else Names.spoken(t)
     }
 
-    /** 单个汉字加解释，其它原样 */
+    /** 单个汉字加解释（直接读成“某某的某”），其它原样 */
     fun explain(text: String): String {
         val t = text.trim()
         if (t.length != 1 || !isCjk(t[0]) || !Config.b("charExplain")) return t
         val w = wordOf(t[0]) ?: return t
-        return "$t，${w}的$t"
+        return "${w}的$t"
     }
 }

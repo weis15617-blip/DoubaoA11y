@@ -108,6 +108,7 @@ object FullscreenMode {
             Speaker.speak("已关闭上半屏手势")
         }
         ModuleEntries.toolbar()
+        ToolbarInject.refreshToolbar()
         return true
     }
 
@@ -513,8 +514,22 @@ object FullscreenMode {
     fun onRootHover(root: View, ev: MotionEvent): Boolean {
         if (!active || !wanted) return false
         val l = layer ?: return false
-        // 抬手离开时的坐标可能已经飘出区域，交给手势层收尾
-        val exit = ev.actionMasked == MotionEvent.ACTION_HOVER_EXIT
+        // 手指原本在上半屏悬停、滑进了下半屏键盘区：取消上半屏悬停，交回键盘区处理
+        if (ev.actionMasked == MotionEvent.ACTION_HOVER_MOVE && l.isHoverTracking) {
+            val local = toLayer(root, l, ev)
+            if (local == null) {
+                l.cancelHover()
+                return false
+            }
+            return try {
+                l.handleHover(local)
+            } finally {
+                local.recycle()
+            }
+        }
+        // 只有原本在上半屏手势区跟踪中的悬停离开，才允许越界收尾；
+        // 落在下半屏键盘/工具栏上的 HOVER_EXIT 绝不能被手势层吞掉，否则键盘与工具栏全部无法抬手输入/点击。
+        val exit = ev.actionMasked == MotionEvent.ACTION_HOVER_EXIT && l.isHoverTracking
         val local = toLayer(root, l, ev, anywhere = exit) ?: return false
         return try {
             l.handleHover(local)
@@ -557,6 +572,9 @@ object FullscreenMode {
         }
         if (hide == layerHidden && hide == (l.visibility == View.GONE)) return
         layerHidden = hide
+        if (hide) {
+            l.cancelTouch()
+        }
         try {
             l.visibility = if (hide) View.GONE else View.VISIBLE
             l.importantForAccessibility =

@@ -14,7 +14,6 @@ object EditOptsPage {
     fun fill(a: SettingsActivity, root: LinearLayout) {
         val ids = a.editOptions().toMutableList()
 
-        root.addView(a.heading("自定义编辑菜单"))
         root.addView(a.note("点击可更换功能，长按删除"))
         fun choose(index: Int?) {
             val options = ConfigSpec.EDIT_OPTION_CHOICES.filter { it.first !in ids || it.first == index?.let(ids::get) }
@@ -26,20 +25,38 @@ object EditOptsPage {
                     a.rebuild()
                 }.setNegativeButton("取消", null).show()
         }
-        for ((index, id) in ids.withIndex()) {
-            // 保留列表渲染所需数据
-        }
         a.addList(
             root,
             ids.mapIndexed { index, id -> "第 ${index + 1} 项：${ConfigSpec.actionName(id)}" },
             onClick = { index -> choose(index) },
             onLongClick = { index ->
-                ids.removeAt(index)
-                a.saveEditOptions(ids)
-                a.rebuild()
+                val name = ConfigSpec.actionName(ids[index])
+                AlertDialog.Builder(a)
+                    .setTitle("删除“$name”？")
+                    .setMessage("确定要从编辑菜单中移除“$name”吗？")
+                    .setPositiveButton("删除") { _, _ ->
+                        ids.removeAt(index)
+                        a.saveEditOptions(ids)
+                        a.rebuild()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
                 true
             },
         )
         root.addView(a.button("添加一项") { choose(null) })
+        root.addView(a.button("恢复默认") {
+            AlertDialog.Builder(a)
+                .setTitle("恢复默认")
+                .setMessage("确定要重置编辑菜单列表为默认项吗？")
+                .setPositiveButton("恢复") { _, _ ->
+                    a.prefs.edit().remove(ConfigSpec.EDIT_OPTIONS_KEY).apply()
+                    a.send(null)
+                    a.rebuild()
+                    a.toast("编辑菜单已恢复默认")
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        })
     }
 }

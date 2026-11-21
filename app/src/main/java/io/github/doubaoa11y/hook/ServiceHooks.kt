@@ -49,12 +49,13 @@ object ServiceHooks {
             val values = p.args.map { it as? Int ?: -1 }
             if (values[0] != values[2] || values[1] != values[3])
                 Candidates.onExternalSelection(values[4] >= 0 && values[5] >= 0)
+            EditActions.onUpdateSelection(values[0], values[1], values[2], values[3])
         }))
         installHideHooks(cl)
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
             SafeHook("fullscreen.insets", after = { p -> FullscreenMode.onComputeInsets(p.args[0]) }))
         Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { _ ->
-            FullscreenMode.shutdown(); EditOptions.onKeyboardHidden(); Speaker.stop()
+            FullscreenMode.shutdown(); TatansBridge.onHidden(); EditOptions.onKeyboardHidden(); Speaker.stop()
         }))
         Hooker.method(c, "onWindowShown", arrayOf(), SafeHook("onWindowShown", after = { _ ->
             L.i("键盘窗口显示（${A11yState.describe()}）")
@@ -176,6 +177,7 @@ object ServiceHooks {
             override fun onReceive(c: Context, i: Intent) {
                 if (i.action == Intent.ACTION_SCREEN_OFF) {
                     ReaderControl.hidden()
+                    TatansBridge.onHidden()
                     FullscreenMode.shutdown(); EditOptions.onKeyboardHidden(); Speaker.stop()
                 }
             }
@@ -203,7 +205,8 @@ object ServiceHooks {
             override fun onReceive(context: Context, intent: Intent) {
                 try {
                     val cmd = intent.getStringExtra(ConfigSpec.EXTRA_CMD)
-                    if (cmd == ConfigSpec.CMD_NATIVE_BACKUP || cmd == ConfigSpec.CMD_NATIVE_RESTORE) {
+                    if (cmd == ConfigSpec.CMD_NATIVE_BACKUP || cmd == ConfigSpec.CMD_NATIVE_RESTORE ||
+                        (cmd == ConfigSpec.CMD_LOG_SAVE && !intent.getStringExtra(ConfigSpec.EXTRA_NATIVE_TOKEN).isNullOrEmpty())) {
                         val token = intent.getStringExtra(ConfigSpec.EXTRA_NATIVE_TOKEN).orEmpty()
                         val xferUri = intent.getStringExtra(ConfigSpec.EXTRA_NATIVE_URI)
                             ?.takeIf { it.isNotEmpty() }
@@ -213,10 +216,10 @@ object ServiceHooks {
                         val pending = goAsync()
                         Thread({
                             try {
-                                val res = if (cmd == ConfigSpec.CMD_NATIVE_BACKUP) {
-                                    NativeBackup.exportBackup(ctx, token, xferUri, includeClipboard)
-                                } else {
-                                    NativeBackup.stageRestore(ctx, token, xferUri)
+                                val res = when (cmd) {
+                                    ConfigSpec.CMD_NATIVE_BACKUP -> NativeBackup.exportBackup(ctx, token, xferUri, includeClipboard)
+                                    ConfigSpec.CMD_NATIVE_RESTORE -> NativeBackup.stageRestore(ctx, token, xferUri)
+                                    else -> LogStore.exportToXfer(ctx, token, xferUri)
                                 }
                                 pending.resultCode = Activity.RESULT_OK
                                 pending.resultData = res

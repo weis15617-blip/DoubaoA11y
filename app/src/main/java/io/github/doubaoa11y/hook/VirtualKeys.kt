@@ -313,6 +313,19 @@ object VirtualKeys {
     private var lastRawY = 0f
     private var voiceZone = ""
     private var lastHoldEnd = 0L
+    /** 空格长按在语音启动前取消后，短暂拦截原生层迟到的 StartAsrOnSpaceLPress */
+    @Volatile
+    private var spaceCancelUntil = 0L
+
+    /** 当前是否应拦截原生层迟到的空格长按语音触发 */
+    fun shouldBlockSpaceAsr(): Boolean {
+        if (holding != null && holdIsVoice) return false
+        val until = spaceCancelUntil
+        if (until <= 0L) return false
+        if (SystemClock.uptimeMillis() < until) return true
+        spaceCancelUntil = 0L
+        return false
+    }
 
     private fun speakKey(v: View, s: State, id: Int) {
         val k = s.keys.getOrNull(id) ?: return
@@ -455,6 +468,11 @@ object VirtualKeys {
         }
         when (ev.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                if (scrollingSymbolBar && ev.actionMasked == MotionEvent.ACTION_HOVER_MOVE) {
+                    val tol = 24f * root.resources.displayMetrics.density
+                    if (kotlin.math.hypot(rx - scrollRx, ry - scrollRy) <= tol) return true
+                    cancelScroll()
+                }
                 // 手指落在缝里、下面什么都没有：16dp 以内找最近的键或按钮，读它、抬手也输入它
                 val t = t ?: if (missedAll) fallbackTarget(root, rx, ry) else null
                 if (t == null) {
@@ -474,7 +492,10 @@ object VirtualKeys {
                 Haptic.tick()
                 Sound.play(if (t.view?.javaClass?.simpleName?.contains("Candidate") == true) "scroll" else "key")
                 Speaker.speak(t.name)
-                if (t.key != null && t.kb != null) scheduleHold(t.kb, t.key)
+                if (t.key != null && t.kb != null) {
+                    scheduleHold(t.kb, t.key)
+                    scheduleSymbolScroll(root, t.kb, t.key, rx, ry)
+                }
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 val c = current
@@ -501,6 +522,224 @@ object VirtualKeys {
         return true
     }
 
+
+    // ---------------- 符号区域停留翻页 ----------------
+
+    private class SymbolBar(
+        val barRect: Rect,
+        val vertical: Boolean,
+        val keys: List<Key>,
+    )
+
+    private class BarScrollState(
+        var startSnapshot: List<String>? = null,
+        var blockedBackSnapshot: List<String>? = null,
+        var blockedForwardSnapshot: List<String>? = null,
+    )
+
+    private var barBoardName: String = ""
+    private val barStates = HashMap<String, BarScrollState>()
+    private var scrollRunnable: Runnable? = null
+    private var afterScrollRunnable: Runnable? = null
+    private var scrollingSymbolBar = false
+    private var scrollRx = 0f
+    private var scrollRy = 0f
+
+    private fun cancelScroll() {
+        scrollRunnable?.let { main.removeCallbacks(it) }
+        scrollRunnable = null
+        afterScrollRunnable?.let { main.removeCallbacks(it) }
+        afterScrollRunnable = null
+        scrollingSymbolBar = false
+    }
+
+    private fun findSymbolBottomRow(table: DrawTable): SymbolBar? {
+        if (KeyboardState.boardName != "符号键盘" || table.width <= 0 || table.height <= 0) return null
+        val all = table.keys()
+        val ret = all.firstOrNull { it.mainName() == "返回" && it.rect.top >= table.height * 2 / 3 }
+        val rowTop = ret?.rect?.top ?: (table.height * 3 / 4)
+        val barLeft = ret?.rect?.right ?: 0
+        val barRight = table.width
+        val row = all.filter { k ->
+            k !== ret && k.mainName() != "返回" &&
+                k.rect.centerY() >= rowTop && k.rect.bottom <= table.height + 16 &&
+                k.rect.right > barLeft + 20 && k.rect.left < barRight - 20
+        }.sortedBy { it.rect.left }
+        if (row.size < 2) return null
+        val top = row.minOf { it.rect.top }
+        val bottom = row.maxOf { it.rect.bottom }
+        return SymbolBar(Rect(barLeft, top, barRight, bottom), false, row)
+    }
+
+    private fun barKeysIn(table: DrawTable, barRect: Rect, vertical: Boolean): List<Key> {
+        val all = table.keys()
+        return if (vertical) {
+            all.filter { it.inColumn && it.bg?.rect == barRect }.sortedBy { it.rect.top }
+        } else {
+            findSymbolBottomRow(table)?.keys ?: all.filter {
+                (it.inRow && it.bg?.rect == barRect) ||
+                    (barRect.contains(it.rect.centerX(), it.rect.centerY()) && it.rect != barRect)
+            }.sortedBy { it.rect.left }
+        }
+    }
+
+    private fun findSymbolBar(table: DrawTable, k: Key): SymbolBar? {
+        if (k.inColumn) {
+            val bg = k.bg ?: return null
+            val col = barKeysIn(table, bg.rect, true)
+            return if (col.size >= 2) SymbolBar(Rect(bg.rect), true, col) else null
+        }
+        findSymbolBottomRow(table)?.let { rowBar ->
+            if (rowBar.keys.any { it.rect == k.rect }) return rowBar
+        }
+        val barRect = when {
+            k.inRow -> k.bg?.rect
+            else -> table.keys().firstOrNull {
+                it.inRow && it.bg?.rect?.contains(k.rect.centerX(), k.rect.centerY()) == true
+            }?.bg?.rect
+        } ?: return null
+        val row = barKeysIn(table, barRect, false)
+        return if (row.size >= 2) SymbolBar(Rect(barRect), false, row) else null
+    }
+
+    private fun barStateFor(bar: SymbolBar, table: DrawTable, snapshot: List<String>): BarScrollState {
+        val board = KeyboardState.boardName
+        if (board != barBoardName) {
+            barStates.clear()
+            barBoardName = board
+        }
+        val key = "$board:${if (bar.vertical) "V" else "H"}"
+        return barStates.getOrPut(key) {
+            // 首次进入该键盘的符号区且首端无被裁切项时，记录为第一页，避免在第一页首项停留时误尝试向上/左翻页
+            val clippedBefore = table.hasClippedEdge(bar.barRect, bar.vertical, before = true)
+            BarScrollState(startSnapshot = if (clippedBefore) null else snapshot)
+        }
+    }
+
+    /**
+     * 数字/九键左侧符号栏（竖向）与符号键盘底部分类栏（横向）：
+     * 手指停在首尾按键超过设定时间后自动翻页，翻完读出手指下面的新项；
+     * 已在第一页首项或已到达尾页边界时不尝试翻页，避免重复朗读死循环。
+     */
+    private fun scheduleSymbolScroll(root: View, kb: View, k: Key, rx: Float, ry: Float) {
+        if (!Config.b("symbolScroll")) return
+        val table = KeyboardViewHooks.tableOf(kb) ?: return
+        val bar = findSymbolBar(table, k) ?: return
+        val first = bar.keys.first()
+        val last = bar.keys.last()
+        val dir = when {
+            k.rect == last.rect -> -1   // 末项：向后翻（竖栏上拖看下面，横栏左拖看右边）
+            k.rect == first.rect -> 1   // 首项：向前翻（竖栏下拖看上面，横栏右拖看左边）
+            else -> return
+        }
+        val snapshot = bar.keys.map { it.speakable() }
+        val st = barStateFor(bar, table, snapshot)
+        if (dir > 0) {
+            val clippedBefore = table.hasClippedEdge(bar.barRect, bar.vertical, before = true)
+            if (!clippedBefore && (snapshot == st.startSnapshot || snapshot == st.blockedBackSnapshot)) {
+                L.i("符号栏已在第一页，不尝试向${if (bar.vertical) "上" else "左"}翻页")
+                return
+            }
+        } else {
+            val clippedAfter = table.hasClippedEdge(bar.barRect, bar.vertical, before = false)
+            if (!clippedAfter && snapshot == st.blockedForwardSnapshot) {
+                L.i("符号栏已在最后一页，不尝试向${if (bar.vertical) "下" else "右"}翻页")
+                return
+            }
+        }
+        val holdMs = Config.i("symbolScrollMs").toLong().coerceIn(500, 5000)
+        val r = Runnable {
+            scrollRunnable = null
+            try {
+                val curTable = KeyboardViewHooks.tableOf(kb) ?: return@Runnable
+                val curBar = findSymbolBar(curTable, k) ?: bar
+                val beforeNames = curBar.keys.map { it.speakable() }
+                scrollingSymbolBar = true
+                scrollRx = rx
+                scrollRy = ry
+                dragBar(kb, curBar.barRect, curBar.vertical, dir)
+                val after = Runnable {
+                    afterScrollRunnable = null
+                    scrollingSymbolBar = false
+                    try {
+                        val newTable = KeyboardViewHooks.tableOf(kb)
+                        val afterNames = if (newTable != null) {
+                            barKeysIn(newTable, curBar.barRect, curBar.vertical).map { it.speakable() }
+                        } else emptyList()
+                        if (afterNames.isEmpty() || afterNames == beforeNames) {
+                            if (dir > 0) st.blockedBackSnapshot = beforeNames
+                            else st.blockedForwardSnapshot = beforeNames
+                            val dirLabel = if (curBar.vertical) (if (dir < 0) "向下" else "向上") else (if (dir < 0) "向右" else "向左")
+                            L.i("符号栏${dirLabel}翻页未变化，已到达边界")
+                            return@Runnable
+                        }
+                        if (dir > 0) st.blockedForwardSnapshot = null else st.blockedBackSnapshot = null
+                        // 重新看手指下面是什么，读出来
+                        current = null
+                        val t = targetAt(root, rx, ry) ?: return@Runnable
+                        current = t
+                        lastAnnounce = SystemClock.uptimeMillis()
+                        Haptic.tick()
+                        Sound.play("scroll")
+                        Speaker.speak(t.name)
+                        if (t.key != null && t.kb != null) scheduleSymbolScroll(root, t.kb, t.key, rx, ry)
+                    } catch (e: Throwable) {
+                        L.hookError("VirtualKeys.afterScroll", e)
+                    }
+                }
+                afterScrollRunnable = after
+                main.postDelayed(after, 450)
+            } catch (e: Throwable) {
+                scrollingSymbolBar = false
+                L.hookError("VirtualKeys.symbolScroll", e)
+            }
+        }
+        scrollRunnable = r
+        main.postDelayed(r, holdMs)
+    }
+
+    /** 在符号栏上模拟一次拖动，距离是半栏高（竖栏）或半栏宽（横栏） */
+    private fun dragBar(kb: View, bar: Rect, vertical: Boolean, dir: Int) {
+        val vl = IntArray(2)
+        kb.getLocationOnScreen(vl)
+        val down = SystemClock.uptimeMillis()
+        val steps = 8
+        if (vertical) {
+            val x = vl[0] + bar.exactCenterX()
+            val dist = bar.height() * 0.5f
+            val y0 = vl[1] + bar.exactCenterY() - dir * dist / 2
+            L.i("符号栏${if (dir < 0) "向下" else "向上"}翻页")
+            inject(kb, down, MotionEvent.ACTION_DOWN, x, y0)
+            for (i in 1..steps) {
+                val y = y0 + dir * dist * i / steps
+                main.postDelayed({
+                    try {
+                        inject(kb, down, MotionEvent.ACTION_MOVE, x, y)
+                        if (i == steps) inject(kb, down, MotionEvent.ACTION_UP, x, y)
+                    } catch (e: Throwable) {
+                        L.hookError("VirtualKeys.drag", e)
+                    }
+                }, (i * 16).toLong())
+            }
+        } else {
+            val y = vl[1] + bar.exactCenterY()
+            val dist = bar.width() * 0.5f
+            val x0 = vl[0] + bar.exactCenterX() - dir * dist / 2
+            L.i("符号栏${if (dir < 0) "向右" else "向左"}翻页")
+            inject(kb, down, MotionEvent.ACTION_DOWN, x0, y)
+            for (i in 1..steps) {
+                val x = x0 + dir * dist * i / steps
+                main.postDelayed({
+                    try {
+                        inject(kb, down, MotionEvent.ACTION_MOVE, x, y)
+                        if (i == steps) inject(kb, down, MotionEvent.ACTION_UP, x, y)
+                    } catch (e: Throwable) {
+                        L.hookError("VirtualKeys.drag", e)
+                    }
+                }, (i * 16).toLong())
+            }
+        }
+    }
 
     /** 上一次触摸是不是落在交给读屏的界面里 */
     private var inReaderPanel = false
@@ -829,6 +1068,7 @@ object VirtualKeys {
                 holding = k
                 holdView = v
                 holdIsVoice = k.mainName() == "空格"
+                if (holdIsVoice) spaceCancelUntil = 0L
                 voiceZone = ""
                 holdDownTime = SystemClock.uptimeMillis()
                 val vl = IntArray(2)
@@ -848,27 +1088,67 @@ object VirtualKeys {
     private fun cancelHold() {
         holdRunnable?.let { main.removeCallbacks(it) }
         holdRunnable = null
+        cancelScroll()
         val k = holding ?: return
         val v = holdView ?: run { holding = null; return }
         if (holdIsVoice && !voiceShown(v)) {
-            // 语音快开始时手指离开空格：豆包不认取消（照样开始语音），改成滑到键盘上方再松开，不输入
+            // 语音还没弹出时手指离开空格：
+            // 1) 发 ACTION_CANCEL（不能发 ACTION_MOVE + ACTION_UP，否则豆包会把短按空格+上滑抬手当成点按，误上屏一个空格）；
+            // 2) 短暂拦截迟到的 StartAsrOnSpaceLPress，若录音刚启动则主动停掉，避免语音卡住；
+            // 3) 兜底保留 adoptVoiceLater，万一后续仍弹出语音面板，由模块接回控制。
             val down = holdDownTime
-            val vl = IntArray(2)
-            v.getLocationOnScreen(vl)
-            val x = vl[0] + k.rect.exactCenterX()
-            val y = vl[1] - 300f
+            val now = SystemClock.uptimeMillis()
+            spaceCancelUntil = now + NATIVE_LONG_PRESS_MS + 300
             holding = null
             holdView = null
             holdIsVoice = false
-            lastHoldEnd = SystemClock.uptimeMillis()
-            L.i("取消「${k.speakable()}」，语音还没开始，滑出键盘松开，按住 ${SystemClock.uptimeMillis() - down} 毫秒")
-            inject(v, down, MotionEvent.ACTION_MOVE, x, y)
-            inject(v, down, MotionEvent.ACTION_UP, x, y)
+            lastHoldEnd = now
+            L.i("取消「${k.speakable()}」，语音还没开始，发取消事件，按住 ${now - down} 毫秒")
+            inject(v, down, MotionEvent.ACTION_CANCEL, lastRawX, lastRawY)
+            if (Voice.isRecording()) stopCancelledSpaceAsr("取消时已在录音")
+            main.postDelayed({
+                try {
+                    if (holding == null && SystemClock.uptimeMillis() < spaceCancelUntil &&
+                        (Voice.isRecording() || voiceShown(v))) {
+                        stopCancelledSpaceAsr("取消后延迟检查")
+                    }
+                } catch (t: Throwable) {
+                    L.hookError("VirtualKeys.cancelVoiceCheck", t)
+                }
+            }, 120)
             adoptVoiceLater(v, k, down)
             return
         }
         // 手指滑到别的键上：取消，不输入
         release(v, k, MotionEvent.ACTION_CANCEL, lastRawX, lastRawY)
+    }
+
+    private fun stopCancelledSpaceAsr(why: String) {
+        try {
+            Voice.discard()
+        } catch (t: Throwable) {
+            L.hookError("VirtualKeys.stopCancelledSpaceAsr.discard", t)
+        }
+        val c = JniHooks.jniClass ?: return
+        try {
+            val stop = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(
+                c, "AsrStopCommand", Boolean::class.javaPrimitiveType!!, String::class.java
+            )
+            if (stop != null) {
+                stop.invoke(null, true, "cancel")
+                L.i("取消空格长按语音：调用 AsrStopCommand(true, cancel)（$why）")
+                return
+            }
+            val fn = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(
+                c, "DoFunctionKey", Int::class.javaPrimitiveType!!
+            )
+            if (fn != null) {
+                L.w("取消空格长按语音：AsrStopCommand 未找到，降级调用 DoFunctionKey(7)（$why）")
+                fn.invoke(null, 7)
+            }
+        } catch (t: Throwable) {
+            L.hookError("VirtualKeys.stopCancelledSpaceAsr", t)
+        }
     }
 
     /**
@@ -966,6 +1246,7 @@ object VirtualKeys {
     // ---------------- 合成触摸 ----------------
 
     private fun tap(v: View, k: Key) {
+        KeyboardOps.cancelOrganizeWatch()
         val name = k.mainName()
         // 全屏：键盘区一打字，上半屏的编辑选项轮盘就回到“双击跳转行首行尾”那一项；
         // 删除键顺带看看多选是不是该退出了（选中的文本被删掉，编辑框里就没有选区了）
@@ -1096,6 +1377,7 @@ object VirtualKeys {
                 passThrough = true
                 cancelHold()
                 current = null
+                lastKeyTap = SystemClock.uptimeMillis()
                 if (n == "空格") {
                     nativeVoiceKb = t?.kb
                     voiceZone = ""
@@ -1120,6 +1402,7 @@ object VirtualKeys {
                 }
             }
             if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+                if (ev.actionMasked == MotionEvent.ACTION_UP) lastKeyTap = SystemClock.uptimeMillis()
                 passThrough = false
                 nativeVoiceKb = null
                 voiceZone = ""
@@ -1203,6 +1486,43 @@ object VirtualKeys {
         return true
     }
 
+    /** 模拟豆包原生“在删除键上向左滑”清空候选栏 */
+    fun swipeLeftDelete(): Boolean {
+        val (v, k) = findKey("删除") ?: return false
+        return try {
+            val vl = IntArray(2)
+            v.getLocationOnScreen(vl)
+            val x0 = vl[0] + k.rect.exactCenterX()
+            val y0 = vl[1] + k.rect.exactCenterY()
+            val density = v.resources.displayMetrics.density
+            val dist = maxOf(160f * density, k.rect.width() * 2.2f).coerceAtMost((x0 - vl[0] - 8f).coerceAtLeast(1f))
+            val down = SystemClock.uptimeMillis()
+            L.i("全屏手势：模拟左滑删除键（起点=${x0.toInt()},${y0.toInt()} 左滑=${dist.toInt()}px）")
+            inject(v, down, MotionEvent.ACTION_DOWN, x0, y0)
+            for (step in 1..3) {
+                val x = x0 - dist * step / 3f
+                main.postDelayed({
+                    try {
+                        inject(v, down, MotionEvent.ACTION_MOVE, x, y0)
+                    } catch (t: Throwable) {
+                        L.hookError("VirtualKeys.swipeLeftDelete.move", t)
+                    }
+                }, step * 10L)
+            }
+            main.postDelayed({
+                try {
+                    inject(v, down, MotionEvent.ACTION_UP, x0 - dist, y0)
+                } catch (t: Throwable) {
+                    L.hookError("VirtualKeys.swipeLeftDelete.up", t)
+                }
+            }, 40L)
+            true
+        } catch (t: Throwable) {
+            L.hookError("VirtualKeys.swipeLeftDelete", t)
+            false
+        }
+    }
+
     /** 全屏手势：点键盘窗口里的一个控件（菜单按钮这类） */
     fun tapViewOnScreen(root: View, v: View) = tapView(root, v)
 
@@ -1228,6 +1548,7 @@ object VirtualKeys {
         holding = k
         holdView = v
         holdIsVoice = true
+        spaceCancelUntil = 0L
         voiceZone = ""
         holdDownTime = SystemClock.uptimeMillis()
         lastRawX = vl[0] + k.rect.exactCenterX()
@@ -1263,9 +1584,13 @@ object VirtualKeys {
     fun reset() {
         holdRunnable?.let { main.removeCallbacks(it) }
         holdRunnable = null
+        cancelScroll()
+        barStates.clear()
+        barBoardName = ""
         holding = null
         holdView = null
         holdIsVoice = false
+        spaceCancelUntil = 0L
         for (s in states.values) {
             s.hovered = HOST
             s.focused = HOST

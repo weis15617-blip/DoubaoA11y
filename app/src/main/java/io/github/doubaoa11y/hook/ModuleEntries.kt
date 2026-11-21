@@ -4,42 +4,36 @@ import android.content.Intent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
-import android.widget.TextView
 
-/** 仅在确认的普通布局容器内添加控件，不向 RecyclerView 添加 unmanaged child。 */
+/** 模块在豆包内的入口：顶部工具栏已由 ToolbarInject 接入原生管线，此处仅保留刷新桥接与设置页入口。 */
 object ModuleEntries {
-    private const val TAG = "doubaoa11y_screen_switch"
+    private const val LEGACY_TAG = "doubaoa11y_screen_switch"
+
     fun toggleToolbar(context: android.content.Context): Boolean = try {
         val enabled = !Config.b("screenToolbar")
-        Config.setFromIme(context, "screenToolbar", enabled)
-        toolbar()
+        ToolbarInject.setToolEnabled(context, ToolbarInject.KEY_UPPER_GESTURE, enabled)
         Speaker.speak(if (enabled) "已添加上半屏手势" else "已移除上半屏手势")
         true
-    } catch (t: Throwable) { L.hookError("ModuleEntries.toggleToolbar", t); Speaker.speak("保存工具栏设置失败"); false }
+    } catch (t: Throwable) {
+        L.hookError("ModuleEntries.toggleToolbar", t)
+        Speaker.speak("保存工具栏设置失败")
+        false
+    }
+
     fun toolbar() {
         try {
-            val root = ViewA11yHooks.service?.window?.window?.decorView ?: return
-            val id = root.resources.getIdentifier("middle_container", "id", root.context.packageName)
-            val box = root.findViewById<View>(id) as? LinearLayout ?: return
-            var button = box.findViewWithTag<TextView>(TAG)
-            if (!A11yState.recording || !Config.b("screenToolbar")) { button?.visibility = View.GONE; return }
-            if (button == null) {
-                button = TextView(box.context).apply {
-                    tag = TAG; textSize = 13f; gravity = android.view.Gravity.CENTER
-                    val pad = (6 * resources.displayMetrics.density).toInt(); setPadding(pad, 0, pad, 0)
-                    minimumWidth = (44 * resources.displayMetrics.density).toInt()
-                    isClickable = true; isFocusable = true
-                    setOnClickListener { try { if (A11yState.recording) { FullscreenMode.toggleScreenMode(); toolbar() } } catch (t: Throwable) { L.hookError("ModuleEntries.click", t) } }
-                }
-                box.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            // 清理旧版残留的外挂按钮（如有）
+            val root = ViewA11yHooks.service?.window?.window?.decorView
+            if (root != null) {
+                val id = root.resources.getIdentifier("middle_container", "id", root.context.packageName)
+                val box = if (id != 0) root.findViewById<View>(id) as? ViewGroup else null
+                box?.findViewWithTag<View>(LEGACY_TAG)?.let { box.removeView(it) }
             }
-            if (button.visibility != View.VISIBLE) button.visibility = View.VISIBLE
-            val title = "上半屏"
-            val description = if (Config.fullscreen) "关闭上半屏手势" else "开启上半屏手势"
-            if (button.text.toString() != title) button.text = title
-            if (button.contentDescription?.toString() != description) button.contentDescription = description
-        } catch (t: Throwable) { L.hookError("ModuleEntries.toolbar", t) }
+        } catch (t: Throwable) {
+            L.hookError("ModuleEntries.toolbar", t)
+        }
     }
+
     fun settings(root: View) {
         try {
             val parent = root.parent as? ViewGroup ?: return

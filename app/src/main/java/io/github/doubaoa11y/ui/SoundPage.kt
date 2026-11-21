@@ -3,22 +3,36 @@ package io.github.doubaoa11y.ui
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.TextView
 import io.github.doubaoa11y.ConfigSpec
 import io.github.doubaoa11y.SoundEngine
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 
 object SoundPage {
     private const val IMPORT = 4813
-    private const val EXPORT = 4814
+    private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
+    private val audioExts = setOf("ogg", "wav", "mp3", "m4a", "aac", "flac", "opus", "amr", "audio")
+
+    private data class SoundCandidate(
+        val file: File,
+        val durationMs: Long,
+    )
+
     private fun sounds(a: SettingsActivity) = SoundEngine.slots.map { "builtin.$it" } +
         SoundEngine.imports(a).map { it.nameWithoutExtension }
 
@@ -41,19 +55,29 @@ object SoundPage {
             })
         }
         root.addView(a.heading("音效管理"))
-        manage(a, root)
+        root.addView(a.note("音效导入导出目录：${AppStorage.displayDir(AppStorage.DIR_SOUNDS)}"))
+        val ids = sounds(a)
+        root.addView(a.button("导入音频") {
+            AppStorage.ensurePermission(a) {
+                a.startActivity(Intent(a, SettingsActivity::class.java).putExtra(SettingsActivity.EXTRA_PAGE, SettingsActivity.SOUND_IMPORT))
+            }
+        })
+        root.addView(a.button("导出音频") {
+            AlertDialog.Builder(a).setTitle("选择要导出的音效").setItems(
+                ids.map { SoundEngine.label(a, it) }.toTypedArray()) { _, i ->
+                val id = ids[i]
+                AppStorage.ensurePermission(a) { exportToStorage(a, id) }
+            }.setNegativeButton("取消", null).show()
+        })
+        root.addView(a.button("自定义音效") {
+            a.startActivity(Intent(a, SettingsActivity::class.java).putExtra(SettingsActivity.EXTRA_PAGE, SettingsActivity.SOUND))
+        })
     }
 
     fun manage(a: SettingsActivity, root: LinearLayout) {
         val ids = sounds(a)
-        root.addView(a.button("导入音频") { pick(a, IMPORT, null) })
-        root.addView(a.button("导出音频") {
-            AlertDialog.Builder(a).setTitle("选择要导出的音效").setItems(
-                ids.map { SoundEngine.label(a, it) }.toTypedArray()) { _, i -> pick(a, EXPORT, ids[i]) }
-                .setNegativeButton("取消", null).show()
-        })
         root.addView(a.note("点击试听，长按导入的音效可删除或重命名"))
-        root.addView(android.widget.TextView(a).apply {
+        root.addView(TextView(a).apply {
             text = "共 ${ids.size} 个音效"
             isFocusable = true
             setPadding(0, a.pad / 4, 0, a.pad / 4)
@@ -91,6 +115,191 @@ object SoundPage {
         )
     }
 
+    fun fillImportList(a: SettingsActivity, root: LinearLayout) {
+        root.addView(a.note("目录：${AppStorage.displayDir(AppStorage.DIR_SOUNDS)}\n点击音频可试听或导入（需 5 秒以内、5 MB 以下），长按可删除文件。"))
+        if (!AppStorage.hasPermission(a)) {
+            root.addView(a.button("授予存储权限") {
+                AppStorage.ensurePermission(a) { a.rebuild() }
+            })
+            root.addView(a.button("从其他位置选择音频文件") { pickExternal(a) })
+            return
+        }
+        val box = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(a.note("正在扫描可导入的音频文件…"))
+        root.addView(box)
+        root.addView(a.button("刷新列表") { a.rebuild() })
+        root.addView(a.button("从其他位置选择音频文件") { pickExternal(a) })
+
+        worker.execute {
+            val items = scanSoundsDir()
+            main.post {
+                if (a.isFinishing || a.isDestroyed) return@post
+                box.removeAllViews()
+                if (items.isEmpty()) {
+                    box.addView(
+                        a.note(
+                            "“${AppStorage.displayDir(AppStorage.DIR_SOUNDS)}”中暂无可导入的有效音频。\n" +
+                                "请将 5 秒以内的音频（ogg/wav/mp3/m4a 等）放入该文件夹后点击刷新列表。"
+                        )
+                    )
+                    return@post
+                }
+                box.addView(TextView(a).apply {
+                    text = "共 ${items.size} 个可导入的音频"
+                    isFocusable = true
+                    setPadding(0, a.pad / 4, 0, a.pad / 4)
+                })
+                a.addList(
+                    box,
+                    items.map { item ->
+                        val sec = String.format(Locale.US, "%.1f 秒", item.durationMs / 1000.0)
+                        "${item.file.name}\n$sec · ${AppStorage.formatSize(item.file.length())} · ${AppStorage.formatTime(item.file.lastModified())}"
+                    },
+                    onClick = { idx -> showImportChoice(a, items[idx]) },
+                    onLongClick = { idx ->
+                        val f = items[idx].file
+                        AlertDialog.Builder(a)
+                            .setTitle("删除音频文件？")
+                            .setMessage("确定要从本地文件夹删除“${f.name}”吗？已导入到音效库的副本不受影响。")
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton("删除") { _, _ ->
+                                if (f.delete()) {
+                                    a.toast("已删除“${f.name}”")
+                                    a.rebuild()
+                                } else {
+                                    a.toast("删除失败")
+                                }
+                            }
+                            .show()
+                        true
+                    },
+                )
+            }
+        }
+    }
+
+    private fun showImportChoice(a: SettingsActivity, item: SoundCandidate) {
+        val sec = String.format(Locale.US, "%.1f 秒", item.durationMs / 1000.0)
+        val d = AlertDialog.Builder(a)
+            .setTitle(item.file.name)
+            .setMessage("时长：$sec，大小：${AppStorage.formatSize(item.file.length())}\n可先试听，确认后导入到音效库。")
+            .setNegativeButton("取消", null)
+            .setNeutralButton("试听", null)
+            .setPositiveButton("导入") { _, _ -> importFromFile(a, item.file) }
+            .create()
+        d.show()
+        // 点击“试听”不关闭弹窗，方便试听后直接点导入
+        d.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
+            SoundEngine.previewFile(a, item.file)
+        }
+    }
+
+    private fun scanSoundsDir(): List<SoundCandidate> {
+        AppStorage.ensureDirs()
+        val files = AppStorage.soundsDir().listFiles().orEmpty()
+            .filter {
+                it.isFile && it.length() in 1L..ZipBackup.MAX_AUDIO.toLong() &&
+                    (it.extension.lowercase() in audioExts || it.extension.isEmpty())
+            }
+            .sortedByDescending { it.lastModified() }
+        val out = ArrayList<SoundCandidate>()
+        for (f in files) {
+            val dur = readValidAudioDuration(f)
+            if (dur != null) out.add(SoundCandidate(f, dur))
+        }
+        return out
+    }
+
+    private fun readValidAudioDuration(file: File): Long? {
+        val meta = MediaMetadataRetriever()
+        return try {
+            meta.setDataSource(file.absolutePath)
+            if (meta.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) != "yes") return null
+            val duration = meta.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            if (duration in 1L..5000L) duration else null
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { meta.release() }
+        }
+    }
+
+    private fun exportToStorage(a: SettingsActivity, id: String) {
+        worker.execute {
+            val outcome = runCatching {
+                val label = SoundEngine.label(a, id)
+                val ext = if (id.startsWith("builtin.")) {
+                    SoundEngine.assets[SoundEngine.slots.indexOf(id.removePrefix("builtin."))].substringAfterLast('.')
+                } else {
+                    label.substringAfterLast('.', "").takeIf { it.lowercase() in audioExts } ?: "ogg"
+                }
+                val base = if (label.endsWith(".$ext", ignoreCase = true)) label.dropLast(ext.length + 1) else label
+                val target = AppStorage.uniqueFile(AppStorage.soundsDir(), base, ext)
+                val input = if (id.startsWith("builtin.")) {
+                    val index = SoundEngine.slots.indexOf(id.removePrefix("builtin."))
+                    a.assets.open("sfx/" + SoundEngine.assets[index])
+                } else {
+                    SoundEngine.file(a, id).inputStream()
+                }
+                input.use { source -> FileOutputStream(target).use { source.copyTo(it) } }
+                target
+            }
+            main.post {
+                if (a.isFinishing || a.isDestroyed) return@post
+                outcome.fold(
+                    onSuccess = { file ->
+                        AlertDialog.Builder(a)
+                            .setTitle("导出成功")
+                            .setMessage("音频已导出。\n保存位置：${AppStorage.displayPath(file)}")
+                            .setPositiveButton("确定", null)
+                            .show()
+                    },
+                    onFailure = { e -> a.toast("音频导出失败：${e.message.orEmpty()}") },
+                )
+            }
+        }
+    }
+
+    private fun importFromFile(a: SettingsActivity, src: File) {
+        worker.execute {
+            val message = try {
+                val name = src.name.trim().take(80).ifEmpty { "导入音频" }
+                val temp = File.createTempFile("sound-", ".audio", a.cacheDir)
+                try {
+                    require(src.isFile && src.length() in 1L..ZipBackup.MAX_AUDIO.toLong()) { "音频为空或超过 5 MB" }
+                    FileInputStream(src).use { input -> FileOutputStream(temp).use { input.copyTo(it) } }
+                    installTempAudio(a, temp, name)
+                } finally {
+                    temp.delete()
+                }
+                "已导入音频“$name”"
+            } catch (e: Exception) {
+                "音频导入失败：${e.message.orEmpty()}"
+            }
+            main.post {
+                if (!a.isFinishing && !a.isDestroyed) {
+                    a.send(null)
+                    a.toast(message)
+                }
+            }
+        }
+    }
+
+    private fun installTempAudio(a: SettingsActivity, temp: File, name: String) {
+        ZipBackup.validateAudio(temp)
+        synchronized(BackupResourceTransaction.lock) {
+            val files = SoundEngine.imports(a)
+            require(files.size + 2 <= ZipBackup.MAX_ENTRIES && files.sumOf { it.length() } + temp.length() < ZipBackup.MAX_TOTAL - BackupFormat.MAX_BYTES) {
+                "音效库超过完整备份容量"
+            }
+            val key = "clip_" + UUID.randomUUID().toString().replace("-", "")
+            val target = SoundEngine.file(a, key)
+            target.parentFile!!.mkdirs()
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            a.prefs.edit().putString("soundNames", SoundEngine.names(a).put(key, name).toString()).apply()
+        }
+    }
+
     private fun remove(a: SettingsActivity, id: String) {
         synchronized(BackupResourceTransaction.lock) {
             val used = SoundEngine.keys.filterKeys { SoundEngine.selection(a, it) == id }
@@ -105,67 +314,54 @@ object SoundPage {
         a.rebuild()
     }
 
-    private fun pick(a: SettingsActivity, request: Int, id: String?) {
+    private fun pickExternal(a: SettingsActivity) {
         try {
-            val intent = Intent(if (id == null) Intent.ACTION_OPEN_DOCUMENT else Intent.ACTION_CREATE_DOCUMENT)
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
                 .setType("audio/*").addCategory(Intent.CATEGORY_OPENABLE)
-            if (id != null) {
-                a.prefs.edit().putString("pendingSoundExport", id).apply()
-                val ext = if (id.startsWith("builtin.")) "." + SoundEngine.assets[SoundEngine.slots.indexOf(id.removePrefix("builtin."))].substringAfterLast('.') else ""
-                intent.putExtra(Intent.EXTRA_TITLE, SoundEngine.label(a, id) + ext)
-            }
-            a.startActivityForResult(intent, request)
-        } catch (_: Throwable) { a.toast("无法打开文件选择器") }
+            a.startActivityForResult(intent, IMPORT)
+        } catch (_: Throwable) {
+            a.toast("无法打开文件选择器")
+        }
     }
 
     fun onResult(a: SettingsActivity, request: Int, result: Int, uri: Uri?): Boolean {
-        if (request != IMPORT && request != EXPORT) return false
-        val id = a.prefs.getString("pendingSoundExport", "").orEmpty()
-        a.prefs.edit().remove("pendingSoundExport").apply()
+        if (request != IMPORT) return false
         if (result != Activity.RESULT_OK || uri == null) return true
         worker.execute {
             val message = try {
-                if (request == EXPORT) {
-                    val input = if (id.startsWith("builtin.")) {
-                        val index = SoundEngine.slots.indexOf(id.removePrefix("builtin."))
-                        a.assets.open("sfx/" + SoundEngine.assets[index])
-                    } else SoundEngine.file(a, id).inputStream()
-                    input.use { source -> requireNotNull(a.contentResolver.openOutputStream(uri, "wt")).use { source.copyTo(it) } }
-                    "音频已导出"
-                } else {
-                    val name = a.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-                        if (it.moveToFirst()) it.getString(0) else null
-                    }.orEmpty().trim().take(80).ifEmpty { "导入音频" }
-                    val temp = File.createTempFile("sound-", ".audio", a.cacheDir)
-                    try {
-                        requireNotNull(a.contentResolver.openInputStream(uri)).use { source ->
-                            temp.outputStream().use { out ->
-                                val buffer = ByteArray(8192)
-                                var size = 0
-                                while (true) {
-                                    val count = source.read(buffer)
-                                    if (count < 0) break
-                                    size += count
-                                    require(size <= ZipBackup.MAX_AUDIO) { "音频不能超过 5 MB" }
-                                    out.write(buffer, 0, count)
-                                }
+                val name = a.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                    if (it.moveToFirst()) it.getString(0) else null
+                }.orEmpty().trim().take(80).ifEmpty { "导入音频" }
+                val temp = File.createTempFile("sound-", ".audio", a.cacheDir)
+                try {
+                    requireNotNull(a.contentResolver.openInputStream(uri)).use { source ->
+                        temp.outputStream().use { out ->
+                            val buffer = ByteArray(8192)
+                            var size = 0
+                            while (true) {
+                                val count = source.read(buffer)
+                                if (count < 0) break
+                                size += count
+                                require(size <= ZipBackup.MAX_AUDIO) { "音频不能超过 5 MB" }
+                                out.write(buffer, 0, count)
                             }
                         }
-                        ZipBackup.validateAudio(temp)
-                        synchronized(BackupResourceTransaction.lock) {
-                            val files = SoundEngine.imports(a)
-                            require(files.size + 2 <= ZipBackup.MAX_ENTRIES && files.sumOf { it.length() } + temp.length() < ZipBackup.MAX_TOTAL - BackupFormat.MAX_BYTES) { "音效库超过完整备份容量" }
-                            val key = "clip_" + UUID.randomUUID().toString().replace("-", "")
-                            val target = SoundEngine.file(a, key)
-                            target.parentFile!!.mkdirs()
-                            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
-                            a.prefs.edit().putString("soundNames", SoundEngine.names(a).put(key, name).toString()).apply()
-                        }
-                    } finally { temp.delete() }
-                    "音频已导入"
+                    }
+                    installTempAudio(a, temp, name)
+                } finally {
+                    temp.delete()
                 }
-            } catch (e: Exception) { "音频操作失败：${e.message.orEmpty()}" }
-            a.runOnUiThread { if (!a.isFinishing && !a.isDestroyed) { a.send(null); a.toast(message); a.rebuild() } }
+                "已导入音频“$name”"
+            } catch (e: Exception) {
+                "音频导入失败：${e.message.orEmpty()}"
+            }
+            main.post {
+                if (!a.isFinishing && !a.isDestroyed) {
+                    a.send(null)
+                    a.toast(message)
+                    a.rebuild()
+                }
+            }
         }
         return true
     }

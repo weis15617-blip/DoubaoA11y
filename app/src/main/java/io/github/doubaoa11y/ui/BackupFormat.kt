@@ -37,7 +37,7 @@ object BackupFormat {
         for (key in raw.keys()) {
             val value = raw.get(key)
             when {
-                key in setOf("nativeEnter", "readerDirectControl", "fsHaptic", "fsCandidateFirst") -> require(value is Boolean)
+                key in setOf("nativeEnter", "readerDirectControl", "fsHaptic", "fsCandidateFirst", "fsSpeakAction", "fsSpeakChar") -> require(value is Boolean)
                 key == "typeMode" && value == 2 -> {
                     out[key] = ConfigSpec.TYPE_LIFT
                     if (!raw.has("upperOperation")) out["upperOperation"] = true

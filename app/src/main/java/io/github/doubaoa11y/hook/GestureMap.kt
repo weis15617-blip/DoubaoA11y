@@ -62,6 +62,7 @@ object GestureMap {
     /** 执行一个动作，返回是否真的做了事情（做不了要震两下提示） */
     fun run(action: Int): Boolean {
         if (action == ConfigSpec.ACT_NONE) return false
+        if (action != ConfigSpec.ACT_SMART_ORGANIZE) KeyboardOps.cancelOrganizeWatch()
         // 天坦输入法那套编辑选项轮盘：上下滑切换，双击执行
         if (action == ConfigSpec.ACT_PREV_OPTION) return EditOptions.prev()
         if (action == ConfigSpec.ACT_NEXT_OPTION) return EditOptions.next()
@@ -109,7 +110,7 @@ object GestureMap {
         ConfigSpec.ACT_SELECT_ALL, ConfigSpec.ACT_SELECT_TEXT,
         ConfigSpec.ACT_COMMIT, ConfigSpec.ACT_CLEAR_CANDIDATE, ConfigSpec.ACT_SEND, ConfigSpec.ACT_SEND_AND_HIDE,
         ConfigSpec.ACT_SWITCH_SCREEN,
-        ConfigSpec.ACT_HIDE, ConfigSpec.ACT_BACK, ConfigSpec.ACT_VOICE,
+        ConfigSpec.ACT_HIDE, ConfigSpec.ACT_BACK, ConfigSpec.ACT_VOICE, ConfigSpec.ACT_SMART_ORGANIZE,
         ConfigSpec.ACT_TOGGLE_FULLSCREEN, ConfigSpec.ACT_EDIT_PANEL,
         ConfigSpec.ACT_SYMBOL, ConfigSpec.ACT_ENGLISH, ConfigSpec.ACT_CHINESE, ConfigSpec.ACT_NUMBER,
         ConfigSpec.ACT_CLIPBOARD, ConfigSpec.ACT_PHRASES, ConfigSpec.ACT_MENU,
@@ -138,6 +139,7 @@ object GestureMap {
         ConfigSpec.ACT_SEND_AND_HIDE -> "这个输入框没有发送"
         ConfigSpec.ACT_SWITCH_SCREEN -> "切换不了输入方式"
         ConfigSpec.ACT_HIDE -> "键盘收不起来"
+        ConfigSpec.ACT_SMART_ORGANIZE -> "当前豆包版本无法直接执行智能整理"
         ConfigSpec.ACT_PREV_OPTION, ConfigSpec.ACT_NEXT_OPTION, ConfigSpec.ACT_RUN_OPTION -> "编辑选项没做成"
 
         else -> "这个动作没做成"

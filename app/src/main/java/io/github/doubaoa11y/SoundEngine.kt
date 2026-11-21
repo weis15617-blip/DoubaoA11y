@@ -80,6 +80,30 @@ object SoundEngine {
         }
         return true
     }
+
+    /** 试听外部音频文件（导入列表预听） */
+    fun previewFile(c: Context, target: File) {
+        if (!target.isFile) return
+        val prefs = c.getSharedPreferences(ConfigSpec.SETTINGS_PREFS, Context.MODE_PRIVATE)
+        val volume = prefs.getInt("soundVolume", 50).coerceIn(0, 100) / 100f
+        if (volume == 0f) return
+        main.post {
+            try {
+                stopNow()
+                val wantUsage = if (prefs.getBoolean("ttsA11yStream", false)) AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY else AudioAttributes.USAGE_MEDIA
+                val p = MediaPlayer(); player = p
+                p.setAudioAttributes(AudioAttributes.Builder().setUsage(wantUsage).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                p.setVolume(volume, volume)
+                p.setDataSource(target.absolutePath)
+                p.setOnPreparedListener { try { if (player === it) it.start() else it.release() } catch (_: Throwable) { if (player === p) stopNow() } }
+                p.setOnCompletionListener { if (player === it) stopNow() }
+                p.setOnErrorListener { _, _, _ -> if (player === p) stopNow(); true }
+                p.prepareAsync()
+                main.postDelayed({ if (player === p) stopNow() }, 5500)
+            } catch (_: Throwable) { stopNow() }
+        }
+    }
+
     private fun builtin(c: Context, slot: String, wantUsage: Int, volume: Float) {
         try {
             if (pool == null || usage != wantUsage) {

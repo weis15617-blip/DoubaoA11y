@@ -45,6 +45,7 @@ object Sound {
     private var stream = 0
     private var pending: Triple<Int, Float, Long>? = null
     private var last = 0L
+    private var lastEvent = ""
 
     fun init(c: Context) {
         val app = c.applicationContext ?: c
@@ -89,8 +90,15 @@ object Sound {
         if (!A11yState.recording || !Config.b("soundOn")) return
         if (event !in SoundEngine.events) return
         val now = SystemClock.uptimeMillis()
-        if (now - last < 35) return
+        // “voice” 起录提示声优先：不被紧邻的按键/双击/手势声节流吞掉，也不被刚结束的手势尾音打断
+        if (event == "voice") {
+            if (lastEvent == "voice" && now - last < 35) return
+        } else {
+            if (lastEvent == "voice" && now - last < 120) return
+            if (now - last < 35) return
+        }
         last = now
+        lastEvent = event
         val c = context ?: return
         val volume = Config.i("soundVolume").coerceIn(0, 100) / 100f
         if (volume <= 0f) return

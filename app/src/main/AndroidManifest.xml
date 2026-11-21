@@ -5,16 +5,31 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- 本地存储根目录“豆包输入法无障碍”文件夹导入导出（备份、解释词库、音效） -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
-    <!-- 需要能“看见”豆包输入法，才能给它发设置广播 -->
+    <!-- 需要能“看见”豆包输入法与主流读屏，才能同步设置并代理读屏穿透/控制接口 -->
     <queries>
         <package android:name="com.bytedance.android.doubaoime" />
+        <package android:name="com.android.tback" />
+        <package android:name="com.nirenr.talkman" />
+        <package android:name="com.bjbyhd.voiceback" />
+        <package android:name="com.bjbyhd.screenreader" />
+        <package android:name="com.dianming.phoneapp" />
         <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+        <intent><action android:name="tatans.intent.action.IME_SERVICE" /></intent>
     </queries>
 
     <application
         android:allowBackup="false"
         android:largeHeap="true"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"

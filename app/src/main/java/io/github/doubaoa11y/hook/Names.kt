@@ -34,10 +34,7 @@ object Names {
     /** 把一段键面文字转成读法：单个标点读名称，其余原样 */
     fun spoken(s: String): String {
         val t = s.trim()
-        if (Config.b("editPanel")) {
-            if (t == "移动光标") return "编辑面板（原移动光标）"
-            if (t == "单手模式") return "编辑模式"
-        }
+        if (Config.b("editPanel") && t == "移动光标") return "编辑面板（原移动光标）"
         punct[t]?.let { return it }
         return t
     }
@@ -69,10 +66,12 @@ object Names {
         "btn_toolbar_translate" to "翻译",
         "btn_toolbar_select_board" to "切换键盘",
         "btn_toolbar_hans_hant" to "简繁切换",
-        "btn_toolbar_one_hand" to "编辑面板",
+        "btn_toolbar_one_hand" to "单手模式",
         "btn_toolbar_move_cursor" to "编辑面板",
         "btn_toolbar_keyboard_adjust" to "调整键盘",
         "btn_toolbar_send" to "发送",
+        "btn_a11y_upper_gesture" to "上半屏手势",
+        "btn_a11y_edit_mode" to "编辑模式",
         "btn_hide" to "收起键盘",
         "btn_logo" to "菜单",
         "btn_switch_window" to "切换窗口",
@@ -123,7 +122,7 @@ object Names {
         "item_translate" to "翻译",
         "item_keyboard_switch" to "切换键盘",
         "item_hans_hant" to "简繁切换",
-        "item_one_hand" to "编辑面板",
+        "item_one_hand" to "单手模式",
         "item_keyboard_adjust" to "调整键盘",
         "item_send" to "发送",
         "item_clear" to "清空",

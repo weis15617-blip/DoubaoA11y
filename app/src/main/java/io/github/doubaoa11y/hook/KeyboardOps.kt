@@ -1,17 +1,30 @@
 package io.github.doubaoa11y.hook
 
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import io.github.doubaoa11y.ConfigSpec
 
 /**
  * 全屏手势里跟“键盘”有关的动作：上屏候选、清空候选、发送、收起键盘、
- * 切键盘、剪贴板、常用语、菜单、编辑面板、语音输入。
+ * 切键盘、剪贴板、常用语、菜单、编辑面板、语音输入、智能整理。
  *
  * 这些不走编辑框，走的是豆包键盘自己的按键和工具栏按钮，所以和 EditActions 分开两份。
  */
 object KeyboardOps {
+    private val main = Handler(Looper.getMainLooper())
+    private var organizeToken = 0L
+    private var organizeWatchUntil = 0L
+    private var organizeBeforeText: String? = null
+    private var organizeStartHintRunner: Runnable? = null
+    private var organizePollRunner: Runnable? = null
+    private var organizeDoneRunner: Runnable? = null
+    private var lastOrganizeTip = ""
+    private var lastOrganizeTipAt = 0L
     private fun root(): View? = try {
         ViewA11yHooks.service?.window?.window?.decorView
     } catch (t: Throwable) {
@@ -44,24 +57,132 @@ object KeyboardOps {
         return false
     }
 
-    /** 清空候选：把组字区清掉，拼音还没上屏时用 */
+    /**
+     * 清空候选：把豆包原生引擎的拼音/组字缓冲和候选栏彻底清掉，不上屏，也不删除已上屏的正文。
+     *
+     * 实测 1.5.6 仅调 finishPreeditNative(false) 只清了编辑框组字，C++ 引擎里仍留着旧拼音。
+     * 按以下顺序逐层清理并核验引擎组字状态（isTypingInput）：
+     * 1) 引擎仍在组字时，循环调用 KeyboardJni.handleJavaBackspaceClickEvent() 逐字退掉拼音
+     *    （每次调用前都核对 isTypingInput() == true，绝不误删已上屏文字）；
+     * 2) 若仍未清空且引擎仍在组字，调用 KeyboardJni.doUpClearAction(1)（对应原生上滑清空输入 SwipeUpClearInput）；
+     * 3) 若仍未清空，模拟豆包原生“在删除键上向左滑动”清空拼音手势；
+     * 4) 手写/非拼音组字或以上都不可用时，降级调 finishPreeditNative(false) + InputConnection 清理。
+     */
     fun clearCandidate(): Boolean {
-        val ic = ic()
-        if (ic != null) {
-            try {
-                ic.setComposingText("", 1)
-                ic.finishComposingText()
-                Candidates.reset("清空候选")
-                L.i("全屏手势：清空候选")
-                // 用户反馈：上滑清空候选栏之后一点声音都没有，不知道到底清没清掉
-                Speaker.speak("候选栏已清空")
-                return true
-            } catch (t: Throwable) {
-                L.hookError("KeyboardOps.clearCandidate", t)
+        val hasCand = Candidates.composing || Candidates.engineTyping() == true
+        if (!hasCand) {
+            Speaker.speak("现在没有候选")
+            return false
+        }
+        // 清理过程中屏蔽中间候选朗读和删字回显，免得打断“候选栏已清空”
+        Candidates.suppressSpeakFor(350)
+        TypingEcho.suppressDeleteFor(350)
+        var how = clearEngineComposing()
+        if (how == null) {
+            // 仅手写候选或找不到原生方法：降级清理 preedit 与编辑框
+            val preeditOk = finishPreeditOnly()
+            val ic = ic()
+            if (!preeditOk && ic == null) {
+                Speaker.speak("现在没有候选")
+                return false
+            }
+            if (!preeditOk && ic != null) {
+                try {
+                    ic.setComposingText("", 1)
+                    ic.finishComposingText()
+                } catch (t: Throwable) {
+                    L.hookError("KeyboardOps.clearCandidate.fallback", t)
+                    return false
+                }
+            }
+            how = if (preeditOk) "finishPreeditNative降级" else "InputConnection降级"
+        }
+        Candidates.reset("清空候选")
+        L.i("全屏手势：清空候选（$how，剩余组字=${Candidates.engineTyping()}）")
+        // 用户反馈：上滑清空候选栏之后一点声音都没有，不知道到底清没清掉
+        Speaker.speak("候选栏已清空")
+        return true
+    }
+
+    private fun clearEngineComposing(): String? {
+        if (Candidates.engineTyping() != true) return null
+        val c = JniHooks.jniClass
+        val j = JniHooks.jni()
+
+        if (c != null && j != null) {
+            // 1) 优先在确认引擎组字中调用 doUpClearAction(1)（对应 SwipeUpClearInput，仅清组字不动已上屏正文）
+            val intType = Int::class.javaPrimitiveType!!
+            val upClear = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(c, "doUpClearAction", intType)
+            if (upClear != null) {
+                try {
+                    upClear.invoke(j, 1)
+                    if (Candidates.engineTyping() != true) return "原生doUpClearAction(1)"
+                    L.w("清空候选：doUpClearAction(1) 后引擎仍在组字，继续尝试退格清理")
+                } catch (t: Throwable) {
+                    L.hookError("KeyboardOps.clearCandidate.upClear", t)
+                }
+            }
+
+            // 2) 降级逐次退掉原生拼音缓冲：每次前检查 isTypingInput()，不可能误删已上屏文字
+            if (Candidates.engineTyping() == true) {
+                val bs = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(c, "handleJavaBackspaceClickEvent")
+                if (bs != null) {
+                    try {
+                        var steps = 0
+                        var stagnant = 0
+                        var prevPy = Candidates.pinyin
+                        var prevFirst = Candidates.current.firstOrNull().orEmpty()
+                        while (steps < 64 && Candidates.engineTyping() == true) {
+                            bs.invoke(j)
+                            steps++
+                            if (Candidates.engineTyping() != true) break
+                            val nowPy = Candidates.pinyin
+                            val nowFirst = Candidates.current.firstOrNull().orEmpty()
+                            if (nowPy == prevPy && nowFirst == prevFirst) {
+                                stagnant++
+                                if (stagnant >= 2) break
+                            } else {
+                                stagnant = 0
+                                prevPy = nowPy
+                                prevFirst = nowFirst
+                            }
+                        }
+                        if (Candidates.engineTyping() != true) return "原生退格${steps}次"
+                        L.w("清空候选：handleJavaBackspaceClickEvent 执行 $steps 次后引擎仍在组字，降级模拟左滑删除键")
+                    } catch (t: Throwable) {
+                        L.hookError("KeyboardOps.clearCandidate.backspace", t)
+                    }
+                }
             }
         }
-        Speaker.speak("现在没有候选")
-        return false
+
+        // 3) 兜底：模拟豆包原生左滑删除键清空候选栏
+        if (Candidates.engineTyping() == true && VirtualKeys.swipeLeftDelete()) {
+            return "模拟左滑删除键"
+        }
+        return null
+    }
+
+    private fun finishPreeditOnly(): Boolean {
+        val c = JniHooks.jniClass ?: return false
+        val j = JniHooks.jni() ?: return false
+        val z = Boolean::class.javaPrimitiveType!!
+        return try {
+            val m1 = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(c, "finishPreeditNative", z)
+            if (m1 != null) {
+                m1.invoke(j, false)
+                return true
+            }
+            val m2 = de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(c, "finishPreeditNative", z, z)
+            if (m2 != null) {
+                m2.invoke(j, false, false)
+                return true
+            }
+            false
+        } catch (t: Throwable) {
+            L.hookError("KeyboardOps.finishPreeditOnly", t)
+            false
+        }
     }
 
     /**
@@ -204,9 +325,10 @@ object KeyboardOps {
     @Volatile
     private var voiceOn = false
 
-    /** 键盘收起时清掉语音状态 */
+    /** 键盘收起时清掉语音与智能整理监听状态 */
     fun resetVoice() {
         voiceOn = false
+        cancelOrganizeWatch()
     }
 
     /** 豆包那边语音真的停了（用户自己点麦克风停的、或者豆包自己结束的）：状态对齐 */
@@ -214,24 +336,58 @@ object KeyboardOps {
         voiceOn = false
     }
 
+    /** 当前是否处于语音输入激活态（供手势层判断是否已发起起录，避免普通手势音效覆盖起录提示声） */
+    fun isVoiceActive(): Boolean = voiceOn || Voice.isRecording()
+
     /**
      * 语音输入：调豆包自己的语音输入，不再模拟“长按空格”。
      *
-     * 反编译核出来的入口：KeyboardJni.DoFunctionKey(int)，KEY_START_SPEECH=6、KEY_STOP_SPEECH=7，
-     * 这就是豆包工具栏那个麦克风按钮按下去时走的路（DoFunctionKey 里 6/7 就是开关语音面板）。
-     * 模拟长按空格的老办法要算坐标、要注入触摸、还依赖空格键的位置和停留时间设置，
-     * 豆包换布局就哑火；直接调这个入口稳定得多，而且识别结果的显示、候选、上屏全按豆包自己的来。
+     * 反编译核出来的入口：
+     * - 开始：KeyboardJni.DoFunctionKey(KEY_START_SPEECH = 6)
+     * - 结束：优先 KeyboardJni.DoFunctionKey(KEY_STOP_SPEECH_WAIT = 36)（对应 AsrManager.a0("keyUp", noWaitResult=false)），
+     *   其次 KeyboardJni.AsrStopCommand(false, "tool")。
+     *   ★ 不能用 KEY_STOP_SPEECH = 7：7 会走 noWaitResult=true 立刻强杀 ASR 并提前结束组字，导致尾句 2~6 个字丢失；
+     *   36 会先停麦并进入 KStoping 等待豆包服务端返回完整尾字后再结束组字，与松开空格键行为一致。
      */
     private fun doubaoVoice(start: Boolean): Boolean {
         val c = JniHooks.jniClass ?: return false
         return try {
-            de.robv.android.xposed.XposedHelpers.callStaticMethod(c, "DoFunctionKey", if (start) 6 else 7)
-            L.i("语音：调用豆包 DoFunctionKey(${if (start) 6 else 7})")
+            if (start) {
+                val startKey = staticIntField(c, "KEY_START_SPEECH") ?: 6
+                de.robv.android.xposed.XposedHelpers.callStaticMethod(c, "DoFunctionKey", startKey)
+                L.i("语音：调用豆包 DoFunctionKey($startKey)")
+                return true
+            }
+            val stopWaitKey = staticIntField(c, "KEY_STOP_SPEECH_WAIT")
+            if (stopWaitKey != null) {
+                de.robv.android.xposed.XposedHelpers.callStaticMethod(c, "DoFunctionKey", stopWaitKey)
+                L.i("语音：调用豆包 DoFunctionKey($stopWaitKey)（等待尾字识别完成）")
+                return true
+            }
+            // 降级 1：调用非立即强停的 AsrStopCommand(false, "tool")
+            try {
+                de.robv.android.xposed.XposedHelpers.callStaticMethod(c, "AsrStopCommand", false, "tool")
+                L.i("语音：调用豆包 AsrStopCommand(false, tool)（降级等待尾字）")
+                return true
+            } catch (_: Throwable) {
+            }
+            // 降级 2：旧版豆包无等待停止入口时退回 KEY_STOP_SPEECH = 7
+            val stopKey = staticIntField(c, "KEY_STOP_SPEECH") ?: 7
+            de.robv.android.xposed.XposedHelpers.callStaticMethod(c, "DoFunctionKey", stopKey)
+            L.i("语音：调用豆包 DoFunctionKey($stopKey)（旧版降级）")
             true
         } catch (t: Throwable) {
             L.w("语音：调用豆包语音入口失败：${t.javaClass.simpleName}")
             false
         }
+    }
+
+    private fun staticIntField(cls: Class<*>, name: String): Int? = try {
+        val f = cls.getDeclaredField(name)
+        f.isAccessible = true
+        (f.get(null) as? Number)?.toInt()
+    } catch (_: Throwable) {
+        null
     }
 
     fun voice(): Boolean {
@@ -243,18 +399,142 @@ object KeyboardOps {
             voiceOn = start
             // ★ 开始说话时**绝对不能出声**（不发播报、不调语音库）：
             // 播报要过 TTS，TTS 一出声就抢音频焦点，豆包的识别当场就停——
-            // 用户听到的就是"话还没说完就自动停了"。这里只放一声很短的音效，
-            // 音效走 SoundPool 的 SFX 通道，不参与焦点竞争。
-            if (start) {            } else {
-                Speaker.speak("结束语音")
-            }
+            // 这里由 Voice.onStart() 播放用户设置的“语音开始”音效（SoundPool 通道，不抢音频焦点）。
+            // 结束说话也不再朗读“结束语音”，避免与即将上屏的识别结果播报冲突。
             return true
         }
         // 豆包版本对不上时退回老办法（按住空格）
         val on = VirtualKeys.toggleVoice()
         voiceOn = on
-        if (!on) Speaker.speak("结束语音")
         return true
+    }
+
+    /**
+     * 智能整理：直接对接豆包底层智能整理功能，不展开菜单、不模拟点击按钮。
+     *
+     * 提示与反馈链路：
+     * 1. 触发后立即监听工具栏提示条（ImeTooltipView / showToast），若豆包在 120ms 内直接弹出
+     *    “请先输入内容再整理”等即时提示，直接朗读该提示不重复播报；
+     * 2. 若 120ms 内未报错（说明已发起异步整理），播报“正在智能整理”；
+     * 3. 整理过程中工具栏弹出任意结果提示（如“表达清晰，无需整理”“整理超时”“整理失败”等），
+     *    第一时间抓取并朗读原话；
+     * 4. 若豆包成功替换了编辑框正文，播报“整理完成，[整理后的文字]”。
+     */
+    fun smartOrganize(): Boolean {
+        if (!A11yState.recording) return false
+        cancelOrganizeWatch()
+        val before = readEditorText()
+        val now = SystemClock.uptimeMillis()
+        val tok = ++organizeToken
+        organizeWatchUntil = now + 15_000L
+        organizeBeforeText = before
+        val ok = when {
+            ToolbarInject.triggerToolbarAction("btn_toolbar_text_organize") -> {
+                L.i("全屏手势：直接触发智能整理（工具栏底层分发）")
+                true
+            }
+            EditHooks.triggerToolboxAction("TEXT_ORGANIZE") -> {
+                L.i("全屏手势：直接触发智能整理（工具箱底层分发）")
+                true
+            }
+            else -> false
+        }
+        if (!ok) {
+            cancelOrganizeWatch()
+            L.w("全屏手势：当前豆包版本未能直连智能整理入口")
+            Speaker.speak("当前豆包版本无法直接执行智能整理")
+            return false
+        }
+        val startHint = Runnable {
+            if (tok != organizeToken || SystemClock.uptimeMillis() > organizeWatchUntil) return@Runnable
+            organizeStartHintRunner = null
+            Speaker.speak("正在智能整理")
+        }
+        organizeStartHintRunner = startHint
+        main.postDelayed(startHint, 120L)
+        if (before != null) {
+            scheduleOrganizePoll(tok)
+        }
+        return true
+    }
+
+    /** 收到工具栏提示条（ImeTooltipView / showToast）文案：在智能整理监听窗口内立刻朗读 */
+    fun onToolbarTip(raw: String) {
+        val text = raw.trim()
+        if (text.isEmpty()) return
+        val now = SystemClock.uptimeMillis()
+        if (now > organizeWatchUntil) return
+        if (text == lastOrganizeTip && now - lastOrganizeTipAt < 800L) return
+        lastOrganizeTip = text
+        lastOrganizeTipAt = now
+        organizeStartHintRunner?.let { main.removeCallbacks(it) }
+        organizeStartHintRunner = null
+        organizeDoneRunner?.let { main.removeCallbacks(it) }
+        organizeDoneRunner = null
+        val inProgress = text.contains("正在") || text.contains("整理中")
+        if (!inProgress) {
+            organizePollRunner?.let { main.removeCallbacks(it) }
+            organizePollRunner = null
+            organizeWatchUntil = 0L
+        }
+        L.i("智能整理工具栏提示：「$text」")
+        Speaker.echo(text)
+    }
+
+    /** 结束当前智能整理监听（收到其他手势、用户手动按键或收起键盘时调用） */
+    fun cancelOrganizeWatch() {
+        organizeToken++
+        organizeWatchUntil = 0L
+        organizeBeforeText = null
+        organizeStartHintRunner?.let { main.removeCallbacks(it) }
+        organizeStartHintRunner = null
+        organizePollRunner?.let { main.removeCallbacks(it) }
+        organizePollRunner = null
+        organizeDoneRunner?.let { main.removeCallbacks(it) }
+        organizeDoneRunner = null
+    }
+
+    private fun scheduleOrganizePoll(tok: Long) {
+        val runner = Runnable {
+            if (tok != organizeToken) return@Runnable
+            if (SystemClock.uptimeMillis() > organizeWatchUntil) {
+                cancelOrganizeWatch()
+                return@Runnable
+            }
+            val nowText = readEditorText()
+            val before = organizeBeforeText
+            if (nowText != null && before != null && nowText != before) {
+                organizeStartHintRunner?.let { main.removeCallbacks(it) }
+                organizeStartHintRunner = null
+                organizePollRunner = null
+                val done = Runnable {
+                    if (tok != organizeToken) return@Runnable
+                    organizeDoneRunner = null
+                    organizeWatchUntil = 0L
+                    val trimmed = nowText.trim()
+                    val msg = if (trimmed.isEmpty()) "整理完成" else "整理完成，$trimmed"
+                    L.i("智能整理完成，编辑框字数 ${before.length} → ${nowText.length}")
+                    Speaker.echo(msg)
+                }
+                organizeDoneRunner = done
+                // 留 140ms 让可能同时到达的工具栏提示或编辑框事件先落地
+                main.postDelayed(done, 140L)
+                return@Runnable
+            }
+            scheduleOrganizePoll(tok)
+        }
+        organizePollRunner = runner
+        main.postDelayed(runner, 350L)
+    }
+
+    private fun readEditorText(): String? {
+        return try {
+            val c = ic() ?: return null
+            if (!InputPrivacy.mayRead()) return null
+            c.getExtractedText(ExtractedTextRequest(), 0)?.text?.toString()
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     fun handles(a: Int): Boolean = when (a) {
@@ -263,7 +543,7 @@ object KeyboardOps {
         ConfigSpec.ACT_BACK,
         ConfigSpec.ACT_SYMBOL, ConfigSpec.ACT_ENGLISH, ConfigSpec.ACT_CHINESE, ConfigSpec.ACT_NUMBER,
         ConfigSpec.ACT_CLIPBOARD, ConfigSpec.ACT_PHRASES, ConfigSpec.ACT_MENU,
-        ConfigSpec.ACT_EDIT_PANEL, ConfigSpec.ACT_VOICE,
+        ConfigSpec.ACT_EDIT_PANEL, ConfigSpec.ACT_VOICE, ConfigSpec.ACT_SMART_ORGANIZE,
         -> true
         else -> false
     }
@@ -286,6 +566,7 @@ object KeyboardOps {
             ConfigSpec.ACT_MENU -> menu()
             ConfigSpec.ACT_EDIT_PANEL -> editPanel()
             ConfigSpec.ACT_VOICE -> voice()
+            ConfigSpec.ACT_SMART_ORGANIZE -> smartOrganize()
             else -> false
         }
     } catch (t: Throwable) {

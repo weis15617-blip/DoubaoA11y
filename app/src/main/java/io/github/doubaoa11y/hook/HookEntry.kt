@@ -23,6 +23,7 @@ class HookEntry : IXposedHookLoadPackage {
             Voice.install()
             Candidates.install()
             CustomToolbar.install()
+            ToolbarInject.install(cl)
             EditHooks.install(cl)
             StepSlider.install(cl)
             // 豆包自己的设置页在 :Setting 进程，只在那里补开关、复选框、滑块的无障碍信息

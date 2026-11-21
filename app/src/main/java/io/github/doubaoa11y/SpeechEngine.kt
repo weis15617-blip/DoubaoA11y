@@ -98,8 +98,19 @@ object SpeechEngine {
         prepare(ctx, p)
         if (!ready || text.isBlank()) return false
         return try {
+            val e = engine ?: return false
             val b = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, (p.getInt("ttsVolume", 100) / 100f).coerceIn(0f, 1f)) }
-            val ok = engine?.speak(text.take(4000), TextToSpeech.QUEUE_FLUSH, b, "module-${generation}-${System.nanoTime()}") == TextToSpeech.SUCCESS
+            val maxLen = TextToSpeech.getMaxSpeechInputLength().coerceIn(1000, 3500)
+            val chunks = splitChunks(text, maxLen)
+            val baseId = "module-${generation}-${System.nanoTime()}"
+            var ok = true
+            for (i in chunks.indices) {
+                val mode = if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                if (e.speak(chunks[i], mode, b, "$baseId-$i") != TextToSpeech.SUCCESS) {
+                    ok = false
+                    break
+                }
+            }
             if (!ok) { ready = false; failedAt = android.os.SystemClock.uptimeMillis() }
             ok
         } catch (t: Throwable) {
@@ -107,6 +118,35 @@ object SpeechEngine {
             failedAt = android.os.SystemClock.uptimeMillis()
             false
         }
+    }
+
+    /** 按系统 TTS 单次上限分段（优先在换行或句末标点切分，避免截断长文） */
+    private fun splitChunks(text: String, maxLen: Int): List<String> {
+        if (text.length <= maxLen) return listOf(text)
+        val out = ArrayList<String>()
+        var start = 0
+        while (start < text.length) {
+            var end = minOf(text.length, start + maxLen)
+            if (end < text.length) {
+                val minBreak = start + (maxLen * 3) / 4
+                var cut = -1
+                for (i in end - 1 downTo minBreak) {
+                    val c = text[i]
+                    if (c == '\n' || c == '。' || c == '！' || c == '？' || c == '；' || c == '.' || c == '!' || c == '?') {
+                        cut = i + 1
+                        break
+                    }
+                }
+                if (cut > start) {
+                    end = cut
+                } else if (Character.isHighSurrogate(text[end - 1]) && end > start + 1) {
+                    end--
+                }
+            }
+            out.add(text.substring(start, end))
+            start = end
+        }
+        return out
     }
 
     @Synchronized

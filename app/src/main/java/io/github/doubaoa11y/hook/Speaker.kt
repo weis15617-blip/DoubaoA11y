@@ -27,7 +27,7 @@ object Speaker {
     }
     fun mute(ms: Long) { muteUntil = SystemClock.uptimeMillis() + ms }
     fun unmute() { muteUntil = 0L }
-    fun readerWillSpeak(): Boolean = Config.b("speakByReader")
+    fun readerWillSpeak(): Boolean = Config.b("speakByReader") && !TatansBridge.readerEventsSuppressed
     fun hushReader() { /* 不压制用户读屏，宿主应用的选区提示由读屏自身决定。 */ }
     fun echo(text: String) = speak(text)
     fun speak(text: String) {
@@ -36,22 +36,35 @@ object Speaker {
             ttsRequested = true
             val ok = try {
                 val spoken = if (Config.b("ttsPunctuationNames")) Names.punctuationText(text) else text
-                val b = Bundle().apply { putString("text", spoken.take(4000)) }
+                val b = Bundle().apply { putString("text", spoken) }
                 ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
             } catch (t: Throwable) { L.hookError("Speaker.tts", t); false }
             if (ok) return
         }
         readerSay(text)
     }
+    private const val PKG_TALKMAN = "com.nirenr.talkman"
+
     private fun readerSay(text: String) {
         val m = am ?: return
         try {
             if (!m.isEnabled) return
+            val now = SystemClock.uptimeMillis()
+            // 解说收到无 source 的 HOVER_ENTER 时，若当前未按屏且上一条事件恰好是编辑框的
+            // TYPE_VIEW_TEXT_SELECTION_CHANGED(8192)（常见于抬手打字刚写入组字串后），会静默丢弃播报。
+            // 仅在解说下先发一次无副作用的 HOVER_EXIT(256) 刷新上一事件类型，避免候选和提示偶发漏读。
+            if (A11yState.readerPackage == PKG_TALKMAN) {
+                val exit = event(AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
+                exit.packageName = pkg
+                exit.className = "android.inputmethodservice.Keyboard\$Key"
+                exit.eventTime = now
+                m.sendAccessibilityEvent(exit)
+            }
             val ev = event(AccessibilityEvent.TYPE_VIEW_HOVER_ENTER)
             ev.packageName = pkg
             ev.className = "android.inputmethodservice.Keyboard\$Key"
             ev.contentDescription = text
-            ev.eventTime = SystemClock.uptimeMillis()
+            ev.eventTime = now
             m.sendAccessibilityEvent(ev)
         } catch (t: Throwable) { L.hookError("Speaker.reader", t) }
     }

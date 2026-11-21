@@ -80,9 +80,10 @@ object Config {
         if (now - lastPull < 800) return false
         lastPull = now
         return try {
-            for (k in listOf("upperOperation", "screenToolbar")) {
+            for (k in listOf("upperOperation", "screenToolbar", "editToolbar")) {
                 if (isDirty(k)) setFromIme(ctx, k, values[k] ?: (ConfigSpec.defaults[k] ?: false))
             }
+            if (isDirty("toolbarCustomOrder")) setStrFromIme(ctx, "toolbarCustomOrder", strs["toolbarCustomOrder"] ?: "")
             val b = ctx.contentResolver.call(PULL_URI, "dump", null, null) ?: return false
             var changed = false
             val e = prefs?.edit()
@@ -106,6 +107,7 @@ object Config {
                 e?.putInt(item.key, v)
             }
             for (item in ConfigSpec.strItems) {
+                if (isDirty(item.key)) continue
                 if (!b.containsKey(item.key)) continue
                 val v = b.getString(item.key) ?: item.default
                 if (strs[item.key] != v) {
@@ -179,7 +181,7 @@ object Config {
         values[key] = v
         val method = when (key) {
             "upperOperation" -> "setUpperOperation"
-            "screenToolbar" -> "setToolbar"
+            "screenToolbar", "editToolbar" -> "setToolbar"
             else -> null
         }
         var pushed = false
@@ -193,6 +195,26 @@ object Config {
         }
         try {
             prefs?.edit()?.putBoolean(key, v)?.putBoolean("dirty_$key", !pushed)?.apply()
+        } catch (t: Throwable) {
+            L.e("保存设置失败", t)
+        }
+    }
+
+    fun setStrFromIme(ctx: Context?, key: String, v: String) {
+        if (!ConfigSpec.strDefaults.containsKey(key)) return
+        strs[key] = v
+        val method = if (key == "toolbarCustomOrder") "setToolbar" else null
+        var pushed = false
+        if (ctx != null && method != null) {
+            pushed = try {
+                val res = ctx.contentResolver.call(PUSH_URI, method, null, android.os.Bundle().apply { putString(key, v) })
+                res?.getBoolean("saved") == true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        try {
+            prefs?.edit()?.putString(key, v)?.putBoolean("dirty_$key", !pushed)?.apply()
         } catch (t: Throwable) {
             L.e("保存设置失败", t)
         }

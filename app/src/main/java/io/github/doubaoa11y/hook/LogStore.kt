@@ -170,7 +170,30 @@ object LogStore {
         return "已复制最近的日志，共 ${text.length} 个字，可以直接粘贴发给作者。日志很长的话，用“保存日志文件”发完整的。" + offHint()
     }
 
-    /** 完整日志存到“下载”文件夹 */
+    /** 将完整日志写入模块中转文件，供设置页保存到“豆包输入法无障碍/日志”文件夹 */
+    fun exportToXfer(c: Context, token: String, xferUri: android.net.Uri?): String {
+        val all = readAll()
+        check(all.isNotBlank()) { "还没有日志。请先打开“记录日志”，再去重现问题。" }
+        val uri = xferUri ?: io.github.doubaoa11y.SettingsProvider.xferUri(token)
+        val pfd = try {
+            c.contentResolver.openFileDescriptor(uri, "rw")
+        } catch (_: Throwable) {
+            null
+        } ?: run {
+            val b = c.contentResolver.call(io.github.doubaoa11y.SettingsProvider.URI, "openNativeBackupWriteFd", token, null)
+            @Suppress("DEPRECATION")
+            b?.getParcelable("fd")
+        } ?: error("无法打开日志中转文件")
+        pfd.use { fd ->
+            java.io.FileOutputStream(fd.fileDescriptor).use { out ->
+                out.write((header(c) + all).toByteArray(Charsets.UTF_8))
+                out.flush()
+            }
+        }
+        return offHint()
+    }
+
+    /** 完整日志存到“下载”文件夹（旧调用兜底） */
     fun save(c: Context): String {
         val all = readAll()
         if (all.isBlank()) return "还没有日志。请先打开“记录日志”，再去重现问题。"

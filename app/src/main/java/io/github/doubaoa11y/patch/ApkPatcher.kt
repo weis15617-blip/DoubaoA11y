@@ -49,6 +49,15 @@ object ApkPatcher {
         "assets/lspatch/so/armeabi-v7a/liblspatch.so"
     )
 
+    /** 注入到修补后豆包清单的读屏包可见性，避免 Android 11+ 拦截天坦/解说/保益/点明接口 */
+    private val READER_QUERY_PACKAGES = listOf(
+        "com.android.tback",
+        "com.nirenr.talkman",
+        "com.bjbyhd.voiceback",
+        "com.bjbyhd.screenreader",
+        "com.dianming.phoneapp"
+    )
+
     // Android framework 资源 ID（固定不变）
     private const val RES_ID_NAME = 0x01010003
     private const val RES_ID_VALUE = 0x01010024
@@ -344,6 +353,9 @@ object ApkPatcher {
                         }
                     }
                 }
+                if (fixedManifestBytes == null) {
+                    fixedManifestBytes = ensureManifestQueriesFromZip(zf)
+                }
 
                 AlignedZipWriter(unsignedBase).use { out ->
                     val entries = zf.entries()
@@ -421,6 +433,8 @@ object ApkPatcher {
         val meta = app.newElement("meta-data")
         meta.getOrCreateAndroidAttribute("name", RES_ID_NAME).setValueAsString("lspatch")
         meta.getOrCreateAndroidAttribute("value", RES_ID_VALUE).setValueAsString(configBase64)
+
+        ensureReaderQueries(manifest)
 
         manifest.refresh()
         return ManifestPatchResult(manifest.bytes, configBytes)
@@ -596,8 +610,40 @@ object ApkPatcher {
             meta.getOrCreateAndroidAttribute("name", RES_ID_NAME).setValueAsString("lspatch")
             meta.getOrCreateAndroidAttribute("value", RES_ID_VALUE).setValueAsString(configBase64)
         }
+        ensureReaderQueries(manifest)
         manifest.refresh()
         return manifest.bytes
+    }
+
+    private fun ensureManifestQueriesFromZip(zf: ZipFile): ByteArray? {
+        val e = zf.getEntry("AndroidManifest.xml") ?: return null
+        val raw = zf.getInputStream(e).use { it.readBytes() }
+        val manifest = AndroidManifestBlock()
+        manifest.readBytes(ByteArrayInputStream(raw))
+        if (!ensureReaderQueries(manifest)) return null
+        manifest.refresh()
+        return manifest.bytes
+    }
+
+    private fun ensureReaderQueries(manifest: AndroidManifestBlock): Boolean {
+        val root = manifest.manifestElement ?: return false
+        val existing = HashSet<String>()
+        var queriesEl = root.getElement("queries")
+        for (q in root.listElements("queries")) {
+            if (queriesEl == null) queriesEl = q
+            for (pkgEl in q.listElements("package")) {
+                pkgEl.searchAttributeByResourceId(RES_ID_NAME)?.valueAsString?.let { existing.add(it) }
+            }
+        }
+        var changed = false
+        for (pkg in READER_QUERY_PACKAGES) {
+            if (pkg in existing) continue
+            val q = queriesEl ?: root.newElement("queries").also { queriesEl = it }
+            val pkgEl = q.newElement("package")
+            pkgEl.getOrCreateAndroidAttribute("name", RES_ID_NAME).setValueAsString(pkg)
+            changed = true
+        }
+        return changed
     }
 
     private fun isValidHex(s: String): Boolean {

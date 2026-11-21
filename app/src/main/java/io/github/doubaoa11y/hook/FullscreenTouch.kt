@@ -1,5 +1,7 @@
 package io.github.doubaoa11y.hook
 
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
@@ -33,21 +35,67 @@ object FullscreenTouch {
 
     private val density get() = android.content.res.Resources.getSystem().displayMetrics.density
 
+    private val main = Handler(Looper.getMainLooper())
+
     /** 判“有没有滑动”的距离：跟手势灵敏度一起缩放（和 GestureLayer 保持同一套手感） */
     private val slop: Float
-        get() = 18f * density * when (Config.i("gestureSensitivity").coerceIn(0, 2)) {
-            0 -> 1.45f
-            2 -> 0.55f
-            else -> 1f
-        }
+        get() = maxOf(
+            18f * density * when (Config.i("gestureSensitivity").coerceIn(0, 2)) {
+                0 -> 1.45f
+                2 -> 0.55f
+                else -> 1f
+            },
+            18f * density,
+        )
+
+    private val twoDoubleGapMs: Long
+        get() = TwoFingerTapPolicy.doubleGapMs(Config.i("gestureSensitivity").coerceIn(0, 2))
 
     // 键盘区双指手势
-    private var lastTwoTapAt = 0L
+    private var twoTapPending = false
+    private var lastTwoTapUpAt = 0L
+    private var lastTwoTapX = 0f
+    private var lastTwoTapY = 0f
     private var twoDown = false
+    private var firstDownAt = 0L
     private var twoAt = 0L
     private var twoX = 0f
     private var twoY = 0f
+    private var twoUpX = 0f
+    private var twoUpY = 0f
     private var twoFired = false
+
+    private val twoSingleRunner: Runnable = object : Runnable {
+        override fun run() {
+            if (!twoTapPending) return
+            if (region == KEYBOARD && !twoDown && SystemClock.uptimeMillis() - firstDownAt in 0L..120L) {
+                main.postDelayed(this, 80L)
+                return
+            }
+            twoTapPending = false
+            lastTwoTapUpAt = 0L
+            GestureLayer.fireSlot(ConfigSpec.G_DOUBLE_SINGLE_TAP, "全屏双指单击")
+        }
+    }
+
+    private val twoExpireRunner: Runnable = object : Runnable {
+        override fun run() {
+            if (!twoTapPending) return
+            if (region == KEYBOARD && !twoDown && SystemClock.uptimeMillis() - firstDownAt in 0L..120L) {
+                main.postDelayed(this, 80L)
+                return
+            }
+            twoTapPending = false
+            lastTwoTapUpAt = 0L
+        }
+    }
+
+    private fun cancelTwoTap() {
+        twoTapPending = false
+        lastTwoTapUpAt = 0L
+        main.removeCallbacks(twoSingleRunner)
+        main.removeCallbacks(twoExpireRunner)
+    }
 
     /** 全屏触摸的统一入口，所有手指事件都从这里进来 */
     fun handleTouch(root: View, ev: MotionEvent): Boolean {
@@ -58,6 +106,7 @@ object FullscreenTouch {
             region = NONE
             twoDown = false
             twoFired = false
+            firstDownAt = ev.eventTime
         }
         if (region == NONE) {
             if (!downInKeyboard(root, ev)) {
@@ -108,49 +157,91 @@ object FullscreenTouch {
     }
 
     /**
-     * 键盘区的双指手势：双指双击＝执行“双指双击”槽位的动作（默认语音输入），
-     * 双指左右上下滑＝对应槽位。识别期间吞掉事件，不让它漏给豆包或 VirtualKeys。
+     * 键盘区的双指手势：双指单击、双指双击（默认语音输入）、双指左右上下滑。
+     * 识别期间吞掉事件，不让它漏给豆包或 VirtualKeys。
      */
     private fun twoFinger(root: View, ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_DOWN -> {
                 // 第一根手指可能已经摸到一个键并开始朗读了：撤掉，改成双指手势
                 VirtualKeys.cancelExplore()
+                main.removeCallbacks(twoSingleRunner)
+                main.removeCallbacks(twoExpireRunner)
                 twoDown = true
                 twoFired = false
-                twoAt = ev.eventTime
+                twoAt = if (ev.eventTime - firstDownAt in 0L..120L) firstDownAt else ev.eventTime
                 twoX = midX(ev)
                 twoY = midY(ev)
+                twoUpX = twoX
+                twoUpY = twoY
             }
             MotionEvent.ACTION_MOVE -> {
                 // 已经抬起一根手指了，剩下这一根怎么划都不再算双指手势
                 if (!twoDown || twoFired || ev.pointerCount < 2) return true
-                val dx = midX(ev) - twoX
-                val dy = midY(ev) - twoY
+                val cx = midX(ev)
+                val cy = midY(ev)
+                twoUpX = cx
+                twoUpY = cy
+                val dx = cx - twoX
+                val dy = cy - twoY
                 if (kotlin.math.abs(dx) < slop && kotlin.math.abs(dy) < slop) return true
                 twoFired = true
+                cancelTwoTap()
                 val slot = GestureMap.doubleSlide(dx, dy, slop) ?: return true
                 GestureLayer.fireSlot(slot, "全屏双指滑动")
             }
             MotionEvent.ACTION_POINTER_UP -> {
-                // 还有一根手指在屏幕上，等它抬起来再判定
+                if (ev.pointerCount >= 2) {
+                    twoUpX = midX(ev)
+                    twoUpY = midY(ev)
+                }
             }
             MotionEvent.ACTION_UP -> {
-                val quick = ev.eventTime - twoAt <= 420
+                val quick = ev.eventTime - twoAt <= 600L
                 val still = !twoFired
                 twoDown = false
                 region = NONE
                 if (quick && still) {
-                    if (lastTwoTapAt > 0 && ev.eventTime - lastTwoTapAt <= 350) {
-                        lastTwoTapAt = 0L
+                    val gap = twoDoubleGapMs
+                    val radius = maxOf(slop * 4f, 80f * density)
+                    if (TwoFingerTapPolicy.isDoubleTap(
+                            pending = twoTapPending,
+                            firstUpAt = lastTwoTapUpAt,
+                            secondDownAt = twoAt,
+                            dx = twoUpX - lastTwoTapX,
+                            dy = twoUpY - lastTwoTapY,
+                            radius = radius,
+                            gapMs = gap,
+                        )
+                    ) {
+                        cancelTwoTap()
                         GestureLayer.fireSlot(ConfigSpec.G_DOUBLE_TAP, "全屏双指双击", double = true)
-                    } else lastTwoTapAt = ev.eventTime
+                    } else {
+                        val hasSingle = GestureMap.actionOf(ConfigSpec.G_DOUBLE_SINGLE_TAP) != ConfigSpec.ACT_NONE
+                        val hasDouble = GestureMap.actionOf(ConfigSpec.G_DOUBLE_TAP) != ConfigSpec.ACT_NONE
+                        if (hasSingle && !hasDouble) {
+                            cancelTwoTap()
+                            GestureLayer.fireSlot(ConfigSpec.G_DOUBLE_SINGLE_TAP, "全屏双指单击")
+                        } else if (hasSingle || hasDouble) {
+                            twoTapPending = true
+                            lastTwoTapUpAt = ev.eventTime
+                            lastTwoTapX = twoUpX
+                            lastTwoTapY = twoUpY
+                            main.removeCallbacks(twoSingleRunner)
+                            main.removeCallbacks(twoExpireRunner)
+                            if (hasSingle) main.postDelayed(twoSingleRunner, gap)
+                            else main.postDelayed(twoExpireRunner, gap)
+                        }
+                    }
+                } else {
+                    cancelTwoTap()
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
                 twoDown = false
                 twoFired = false
                 region = NONE
+                cancelTwoTap()
             }
         }
         return true
@@ -169,7 +260,7 @@ object FullscreenTouch {
     /** 键盘收起、退出全屏时把状态清干净 */
     fun reset() {
         region = NONE
-        lastTwoTapAt = 0L
+        cancelTwoTap()
         twoDown = false
         twoFired = false
     }

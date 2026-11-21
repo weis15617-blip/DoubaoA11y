@@ -36,6 +36,9 @@ class Key(val rect: Rect, val bg: DrawItem?, val labels: List<DrawItem>) {
     /** 是不是竖长符号栏里的一格（可以滚动） */
     val inColumn: Boolean get() = bg != null && bg.rect.height() >= bg.rect.width() * 3 / 2 && rect != bg.rect
 
+    /** 是不是横向可滚动栏里的一格（符号键盘底部分类栏） */
+    val inRow: Boolean get() = bg != null && bg.rect.width() >= bg.rect.height() * 3 / 2 && rect != bg.rect
+
     /** 主标签：字号最大的；一样大取离中心最近的 */
     val primary: DrawItem? = labels.filter { it.kind == DrawItem.Kind.TEXT }
         .maxWithOrNull(compareBy<DrawItem> { it.size }.thenBy { -dist(it) })
@@ -236,6 +239,28 @@ class DrawTable(var windowName: String) {
             if (!r.intersect(box.rect)) r.set(t.rect)
             Key(r, box, listOf(t))
         }
+    }
+
+    /**
+     * 检查滚动栏 bar 的首端（before=true：竖栏上边、横栏左边）或尾端（before=false：竖栏下边、横栏右边）
+     * 是否有跨边界被裁切的文字绘制项，用来辅助判断该方向是否还能继续滚动。
+     */
+    fun hasClippedEdge(bar: Rect, vertical: Boolean, before: Boolean): Boolean {
+        for (it in items) {
+            if (it.popup || it.kind != DrawItem.Kind.TEXT || it.text.isNullOrBlank()) continue
+            if (vertical) {
+                val ov = minOf(it.rect.right, bar.right) - maxOf(it.rect.left, bar.left)
+                if (ov * 2 <= it.rect.width()) continue
+                if (before && it.rect.top < bar.top - 2 && it.rect.bottom > bar.top) return true
+                if (!before && it.rect.bottom > bar.bottom + 2 && it.rect.top < bar.bottom) return true
+            } else {
+                val ov = minOf(it.rect.bottom, bar.bottom) - maxOf(it.rect.top, bar.top)
+                if (ov * 2 <= it.rect.height()) continue
+                if (before && it.rect.left < bar.left - 2 && it.rect.right > bar.left) return true
+                if (!before && it.rect.right > bar.right + 2 && it.rect.left < bar.right) return true
+            }
+        }
+        return false
     }
 
     /** 按坐标找键：先找包含该点的，再找一定距离内最近的 */

@@ -1,33 +1,25 @@
 package io.github.doubaoa11y.hook
 
 /**
- * 把编辑面板挂到豆包的“单手模式”工具上（用户选的）：工具栏按钮、定制工具栏、菜单里的单手模式都改成编辑面板。
- * 菜单里的“移动光标”也打开编辑面板。豆包的工具栏列表里没有“移动光标”，所以不能直接加它。
+ * 编辑模式入口：
+ * - 工具栏入口已由 ToolbarInject 作为独立自定义工具（KEY_EDIT_MODE）接入原生定制工具栏，不再替换豆包原生的“单手模式”。
+ * - 菜单（工具箱）里的“移动光标”仍保留打开编辑面板，单手模式保持豆包原生行为。
  */
 object EditHooks {
+    private var toolboxActionClass: Class<*>? = null
+    @Volatile
+    private var toolboxItemClick: java.lang.ref.WeakReference<Any>? = null
+
     fun install(cl: ClassLoader) {
-        // 工具栏按钮点击：CandidateIdleView 里唯一的 (String 按钮标识, boolean) -> void 方法（1.5.3 叫 N，1.5.4 叫 Q）
-        val idle = Hooker.findClassQuiet("com.bytedance.common_biz.tool_bar.view.views.CandidateIdleView", cl)
-        val click = idle?.declaredMethods?.filter {
-            it.returnType == Void.TYPE && it.parameterTypes.contentEquals(arrayOf(String::class.java, Boolean::class.javaPrimitiveType))
-        }.orEmpty()
-        if (click.size == 1) {
-            L.i("工具栏点击方法：${click[0].name}")
-            Hooker.hookMember(click[0], SafeHook("CandidateIdleView.${click[0].name}", before = { p ->
-                if ((p.args[0] == "btn_toolbar_one_hand" || p.args[0] == "btn_toolbar_move_cursor") && Config.b("editPanel")) {
-                    if (EditPanel.open()) p.result = null
-                }
-            }))
-        } else {
-            L.w("找不到工具栏点击方法，候选 ${click.size} 个，编辑面板只能从菜单打开")
-        }
-        // 菜单（工具箱）里的“单手模式”“移动光标”
+        // 菜单（工具箱）里的“移动光标”打开编辑面板（不再劫持单手模式 ONE_HAND）
         val action = Hooker.findClassQuiet("com.bytedance.common_biz.tool_box.ToolboxItemAction", cl) ?: return
+        toolboxActionClass = action
         val handler = Hooker.findClassQuiet("com.bytedance.android.input.keyboard.areacontrol.v", cl)
         val old = handler?.let { de.robv.android.xposed.XposedHelpers.findMethodExactIfExists(it, "invoke", action) }
         if (old != null) {
             // 1.5.3：菜单点击的处理函数 invoke(ToolboxItemAction)，返回 Kotlin Unit
             Hooker.hookMember(old, SafeHook("Toolbox.invoke", before = { p ->
+                p.thisObject?.let { toolboxItemClick = java.lang.ref.WeakReference(it) }
                 if (wantsEditPanel(p.args[0])) {
                     val unit = unitOf((p.method as java.lang.reflect.Method).returnType) ?: return@SafeHook
                     p.result = unit
@@ -38,12 +30,20 @@ object EditHooks {
         }
         // 1.5.4 起：ToolboxKeyboardView 的静态方法 (ToolboxKeyboardView, ToolboxItemAction) -> void 把点击转给处理函数
         val view = Hooker.findClassQuiet("com.bytedance.common_biz.tool_box.ToolboxKeyboardView", cl) ?: return
+        // 捕获未混淆的 setOnItemClick 回调，用于直接触发工具箱功能而无需打开菜单界面
+        val setClick = view.declaredMethods.firstOrNull { it.name == "setOnItemClick" && it.parameterTypes.size == 1 }
+        if (setClick != null) {
+            Hooker.hookMember(setClick, SafeHook("Toolbox.setOnItemClick", after = { p ->
+                val listener = p.args.getOrNull(0)
+                if (listener != null) toolboxItemClick = java.lang.ref.WeakReference(listener)
+            }))
+        }
         val dispatch = view.declaredMethods.filter {
             java.lang.reflect.Modifier.isStatic(it.modifiers) && it.returnType == Void.TYPE &&
                 it.parameterTypes.contentEquals(arrayOf(view, action))
         }
         if (dispatch.size != 1) {
-            L.w("找不到菜单点击方法，候选 ${dispatch.size} 个，菜单里的单手模式不会改成编辑面板")
+            L.w("找不到菜单点击方法，候选 ${dispatch.size} 个，菜单里的移动光标不会改成编辑面板")
             return
         }
         L.i("菜单点击方法：${dispatch[0].name}")
@@ -55,9 +55,33 @@ object EditHooks {
         }))
     }
 
+    /**
+     * 通过已捕获的 ToolboxKeyboardView.setOnItemClick 回调直接分发工具箱动作（如 TEXT_ORGANIZE），
+     * 不需要展开菜单或点击控件。
+     */
+    fun triggerToolboxAction(actionName: String): Boolean {
+        val listener = toolboxItemClick?.get() ?: return false
+        val actCls = toolboxActionClass ?: return false
+        return try {
+            val consts = actCls.enumConstants ?: return false
+            val target = consts.firstOrNull { (it as? Enum<*>)?.name == actionName } ?: return false
+            val invoke = listener.javaClass.methods.firstOrNull {
+                it.name == "invoke" && it.parameterTypes.size == 1 &&
+                    (it.parameterTypes[0].isAssignableFrom(actCls) || it.parameterTypes[0] == Any::class.java)
+            } ?: return false
+            invoke.isAccessible = true
+            invoke.invoke(listener, target)
+            L.i("工具箱直连分发：$actionName")
+            true
+        } catch (t: Throwable) {
+            L.hookError("EditHooks.triggerToolboxAction($actionName)", t)
+            false
+        }
+    }
+
     private fun wantsEditPanel(a: Any?): Boolean {
         val n = (a as? Enum<*>)?.name
-        return (n == "ONE_HAND" || n == "MOVE_CURSOR") && Config.b("editPanel")
+        return n == "MOVE_CURSOR" && Config.b("editPanel")
     }
 
     /** 豆包混淆过的 Kotlin Unit：返回类型里那个单例 */
@@ -67,37 +91,14 @@ object EditHooks {
         null
     }
 
-    private const val KEY = "btn_toolbar_move_cursor"
-
-    /**
-     * 豆包的“定制工具栏”里没有“移动光标”（它只在菜单里），这里直接调用豆包定制工具栏用的原生接口把它加上或去掉。
-     * 返回给设置页朗读的结果。
-     */
+    /** 供外部命令添加/移除工具栏的“编辑模式”自定义工具 */
     fun setToolbar(add: Boolean): String {
         return try {
-            val cls = JniHooks.jniClass ?: return "失败：找不到豆包的键盘接口"
-            val j = de.robv.android.xposed.XposedHelpers.callStaticMethod(cls, "getKeyboardJni") ?: return "失败：键盘接口为空"
-            de.robv.android.xposed.XposedHelpers.callMethod(j, "enterCustomizeToolbar")
-            de.robv.android.xposed.XposedHelpers.callMethod(j, "customizeToolbarButton", add, KEY)
-            de.robv.android.xposed.XposedHelpers.callMethod(j, "confirmCustomizeToolbar")
-            de.robv.android.xposed.XposedHelpers.callMethod(j, "exitCustomizeToolbar")
-            val cfg = de.robv.android.xposed.XposedHelpers.callMethod(j, "getToolbarConfig") as? String ?: ""
-            L.i("工具栏设置（${if (add) "添加" else "移除"}编辑面板）后：$cfg")
-            val visible = try {
-                val arr = org.json.JSONObject(cfg).optJSONArray("buttons")
-                var v = false
-                if (arr != null) for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    if (o.optString("name") == KEY) v = o.optBoolean("visible", false)
-                }
-                v
-            } catch (_: Throwable) {
-                null
-            }
-            when {
-                visible == add -> if (add) "已把编辑面板加到工具栏，收起键盘再弹出就能看到" else "已从工具栏移除编辑面板"
-                visible == null -> "已发送请求，但读不到工具栏设置，请弹出键盘看看"
-                else -> "豆包没有接受这个修改"
+            val ok = ToolbarInject.setToolEnabled(ServiceHooks.appContext, ToolbarInject.KEY_EDIT_MODE, add)
+            if (ok) {
+                if (add) "已把编辑模式加到工具栏" else "已从工具栏移除编辑模式"
+            } else {
+                "失败：未能更新编辑模式工具"
             }
         } catch (t: Throwable) {
             L.e("修改工具栏失败", t)

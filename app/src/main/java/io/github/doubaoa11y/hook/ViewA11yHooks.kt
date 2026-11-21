@@ -95,6 +95,9 @@ object ViewA11yHooks {
             return "$base，已添加，双击移除"
         }
         if (cd != null) {
+            if (cd == ToolbarInject.KEY_UPPER_GESTURE) {
+                return if (Config.fullscreen) "关闭上半屏手势" else "开启上半屏手势"
+            }
             Names.toolbarKeys[cd]?.let { return it }
             if (cd.startsWith("temporary_toolbar_button")) return "恢复原文"
             if (cd.startsWith("btn_") || cd.startsWith("item_")) return Names.guessFromId(cd) ?: cd
@@ -201,18 +204,8 @@ object ViewA11yHooks {
             info.isVisibleToUser = false
             return
         }
-        val name = nameFor(v, info) ?: candidateName(v, info) ?: renamed(v, info) ?: return
+        val name = nameFor(v, info) ?: candidateName(v, info) ?: return
         info.contentDescription = name
-    }
-
-    /** 豆包原文要换个读法的（菜单里的“单手模式”读“编辑模式”）：文字或子控件文字正好是它才换 */
-    private fun renamed(v: View, info: AccessibilityNodeInfo): String? {
-        if (!v.contentDescription.isNullOrBlank()) return null
-        val t = (info.text ?: (v as? android.widget.TextView)?.text)?.toString()?.trim()
-            ?: (v as? ViewGroup)?.let { g -> StringBuilder().also { collectText(g, it) }.toString().trim() }
-        if (t.isNullOrEmpty() || t != "单手模式") return null
-        val s = Names.spoken(t)
-        return if (s != t) s else null
     }
 
     /** 双击模式下读屏直接读候选控件的节点：汉字候选加解释，符号读名称 */

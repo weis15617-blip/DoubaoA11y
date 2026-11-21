@@ -69,6 +69,7 @@ object ConfigSpec {
     val items = listOf(
         Item("upperOperation", "上半屏手势", false, Group.GESTURE),
         Item("screenToolbar", "工具栏显示上半屏手势", false, Group.INTERNAL),
+        Item("editToolbar", "工具栏显示编辑模式", false, Group.INTERNAL),
         Item("soundOn", "启用音效", false, Group.STATE),
         // 首页的总开关：关掉后模块什么都不做，豆包和没装模块一样
         Item("moduleOn", "模块总开关", true, Group.MAIN,
@@ -78,6 +79,8 @@ object ConfigSpec {
             "提示：打开 1 小时后自动关闭"),
         Item("logText", "日志包含输入的文字", false, Group.LOG,
             "提示：默认把打的字和语音识别的文字换成星号。排查语音、候选的问题时，作者可能会请你打开"),
+        // 延迟调整
+        Item("symbolScroll", "符号区域停留翻页", true, Group.HOLD),
         // 快速输入（触摸直接到键盘时）
         Item("tatansFast", "快速输入", true, Group.FAST,
             "提示：键盘响应更快，但是读屏手势无法在键盘区域生效"),
@@ -114,9 +117,9 @@ object ConfigSpec {
             "提示：每做一个手势震一下，动作做不了时震两下并说明原因"),
         Item("fsDrag", "启用拖动手势", false, Group.GESTURE,
             "提示：按住不放往一个方向拖动，按设定的间隔反复执行这个方向的动作，适合连续移动光标、连续删字"),
-        Item("fsSpeakAction", "执行手势后朗读结果", true, Group.GESTURE,
+        Item("fsSpeakAction", "执行手势后朗读结果", true, Group.FIXED,
             "提示：关掉后手势照做，只是不读“已删除”“行尾”这类结果提示"),
-        Item("fsSpeakChar", "移动光标时朗读字词", true, Group.GESTURE,
+        Item("fsSpeakChar", "移动光标时朗读字词", true, Group.FIXED,
             "提示：开启后移动光标会朗读字词，如遇到与读屏重复朗读时请关闭"),
         Item("fsCandidateFirst", "有候选时优先操作候选", true, Group.FIXED,
             "提示：正在打拼音、候选栏里有候选时，单击或双击上屏候选，左右滑动切换候选；关掉后按下面每个手势配的动作执行"),
@@ -193,6 +196,7 @@ object ConfigSpec {
     const val G_DRAG2_RIGHT = 16
     const val G_DRAG2_UP = 17
     const val G_DRAG2_DOWN = 18
+    const val G_DOUBLE_SINGLE_TAP = 19
 
     /** 手势槽的顺序（设置页按这个顺序列，键名也按这个顺序取） */
     val GESTURE_SLOTS: List<Pair<Int, String>> = listOf(
@@ -202,6 +206,7 @@ object ConfigSpec {
         G_SINGLE_RIGHT to "单指右滑",
         G_SINGLE_UP to "单指上滑",
         G_SINGLE_DOWN to "单指下滑",
+        G_DOUBLE_SINGLE_TAP to "双指单击",
         G_DOUBLE_TAP to "双指双击",
         G_DOUBLE_LEFT to "双指左滑",
         G_DOUBLE_RIGHT to "双指右滑",
@@ -228,6 +233,7 @@ object ConfigSpec {
         "fsDoubleTap", "fsDoubleLeft", "fsDoubleRight", "fsDoubleUp", "fsDoubleDown",
         "fsDragLeft", "fsDragRight", "fsDragUp", "fsDragDown",
         "fsDrag2Left", "fsDrag2Right", "fsDrag2Up", "fsDrag2Down",
+        "fsDoubleSingleTap",
     )
 
     fun gestureKey(slot: Int): String = gestureKeys.getOrElse(slot) { "fsSingleTap" }
@@ -290,6 +296,8 @@ object ConfigSpec {
     const val ACT_SEND_AND_HIDE = 49
     // 工具栏快捷项“切换全屏和半屏”
     const val ACT_SWITCH_SCREEN = 50
+    // 菜单内的“智能整理”
+    const val ACT_SMART_ORGANIZE = 51
 
     /**
      * 动作表：id 到名字。设置页和豆包进程都用这一份。
@@ -322,13 +330,14 @@ object ConfigSpec {
         ACT_SEND to "执行发送",
         ACT_SEND_AND_HIDE to "发送并收起键盘",
         ACT_HIDE to "收起键盘",
-        ACT_TOGGLE_FULLSCREEN to "暂时关闭全屏模式（本次）",
-        ACT_SWITCH_SCREEN to "切换全屏和半屏",
+        ACT_TOGGLE_FULLSCREEN to "临时关闭上半屏手势",
+        ACT_SWITCH_SCREEN to "关闭上半屏手势",
         ACT_READ_EDITOR to "朗读编辑框文字",
         ACT_READ_LINE to "朗读当前行",
         ACT_READ_SELECTION to "朗读选中文字",
         ACT_CHAR_COUNT to "字符统计",
         ACT_VOICE to "语音输入",
+        ACT_SMART_ORGANIZE to "智能整理",
         ACT_PREV_OPTION to "上一个编辑菜单",
         ACT_NEXT_OPTION to "下一个编辑菜单",
         ACT_RUN_OPTION to "执行当前编辑菜单",
@@ -423,6 +432,7 @@ object ConfigSpec {
         G_SINGLE_DOWN to ACT_NEXT_OPTION,
         G_SINGLE_LEFT to ACT_PREV_CHAR,
         G_SINGLE_RIGHT to ACT_NEXT_CHAR,
+        G_DOUBLE_SINGLE_TAP to ACT_NONE,
         G_DOUBLE_TAP to ACT_VOICE,
         G_DOUBLE_LEFT to ACT_NONE,
         G_DOUBLE_RIGHT to ACT_NONE,
@@ -505,6 +515,7 @@ object ConfigSpec {
         IntItem("deleteHoldMs", "删除键停留时间", 1500, holdOptions, Group.HOLD),
         IntItem("spaceHoldMs", "空格键停留时间", 1000, holdOptions, Group.HOLD),
         IntItem("enterHoldMs", "回车键停留时间", 1000, holdOptions, Group.HOLD),
+        IntItem("symbolScrollMs", "符号翻页停留时间", 800, holdOptions, Group.HOLD),
         IntItem("explainMaxLen", "逐字解释字数", 0, listOf(
             0 to "全部", 1 to "1 个字", 2 to "2 个字", 3 to "3 个字", 4 to "4 个字", 5 to "5 个字",
         ), Group.CANDIDATE),
@@ -528,6 +539,7 @@ object ConfigSpec {
     val strItems = listOf(
         // 空字符串 = 跟随系统默认语音库
         StrItem("soundNames", "音效名称", "{}", Group.INTERNAL),
+        StrItem("toolbarCustomOrder", "工具栏自定义顺序", "", Group.INTERNAL),
         StrItem("ttsEngine", "语音库", "", Group.VOICE),
         StrItem("ttsVoice", "发音人", "", Group.VOICE),
         // 编辑菜单的完整列表（上下滑切换的顺序），逗号分开的动作编号；空 = 用出厂默认

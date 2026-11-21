@@ -2,26 +2,39 @@ package io.github.doubaoa11y.hook
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import java.util.WeakHashMap
 
-/** 独立 TTS 的统一回声。只读操作成功后确认的变化，无法查询的编辑器保守不补读。 */
+/** 统一文本回声（独立 TTS，以及天坦读屏屏蔽 16/8192 期间）。只读操作成功后确认的变化，密码框和无法查询的编辑器保守不补读。 */
 object TypingEcho {
     private val main = Handler(Looper.getMainLooper())
     private val composing = WeakHashMap<InputConnection, Composing>()
     private var session = 0L
     private var deletion: PendingDelete? = null
+    private var suppressDeleteUntil = 0L
     data class Snapshot(val text: String, val selectionStart: Int = -1, val selectionEnd: Int = -1)
     private data class Composing(val start: Int, val inserted: String, val confirmedBody: String) {
         fun validIn(body: String): Boolean = body == confirmedBody && start >= 0 &&
             start + inserted.length <= body.length && body.regionMatches(start, inserted, 0, inserted.length)
     }
     private data class PendingDelete(val session: Long, val connection: InputConnection, val before: Snapshot)
-    private val enabled: Boolean get() = A11yState.recording && !Config.b("speakByReader") && ViewA11yHooks.service?.currentInputEditorInfo != null
-    fun observing(): Boolean = enabled && (Config.b("ttsInputEcho") || Config.b("ttsDeleteEcho") || Config.b("ttsVoiceEcho"))
+    private val suppressedByReader: Boolean get() = TatansBridge.readerEventsSuppressed
+    private val enabled: Boolean
+        get() = A11yState.recording && (suppressedByReader || !Config.b("speakByReader")) &&
+            ViewA11yHooks.service?.currentInputEditorInfo != null
+    private val inputEchoOn: Boolean get() = suppressedByReader || (!Config.b("speakByReader") && Config.b("ttsInputEcho"))
+    private val deleteEchoOn: Boolean get() = suppressedByReader || (!Config.b("speakByReader") && Config.b("ttsDeleteEcho"))
+    private val voiceEchoOn: Boolean get() = suppressedByReader || (!Config.b("speakByReader") && Config.b("ttsVoiceEcho"))
+    fun observing(): Boolean = enabled && (inputEchoOn || deleteEchoOn || voiceEchoOn)
+    fun suppressDeleteFor(ms: Long = 220L) {
+        suppressDeleteUntil = SystemClock.uptimeMillis() + ms
+        deletion = null
+        main.removeCallbacks(readDeletion)
+    }
     fun snapshot(ic: InputConnection): Snapshot? {
-        if (!observing()) return null
+        if (!observing() || !InputPrivacy.mayRead()) return null
         return try {
             val request = ExtractedTextRequest().apply { hintMaxChars = 8192; hintMaxLines = 100 }
             val value = ic.getExtractedText(request, 0) ?: return null
@@ -30,13 +43,13 @@ object TypingEcho {
             if (text.length > 8192) null else Snapshot(text, value.selectionStart, value.selectionEnd)
         } catch (_: Throwable) { null }
     }
-    fun reset() { session++; composing.clear(); deletion = null; main.removeCallbacks(readDeletion) }
+    fun reset() { session++; composing.clear(); deletion = null; suppressDeleteUntil = 0L; main.removeCallbacks(readDeletion) }
     fun successful(ic: InputConnection, name: String, argument: String, before: Snapshot?) {
-        if (!enabled) return
+        if (!enabled || !InputPrivacy.mayRead()) return
         if (name == "finishComposingText") {
             val value = composing.remove(ic) ?: return
             if (snapshot(ic)?.text?.let { value.validIn(it) } != true) return
-            if (!Voice.acceptSuccessfulWrite(value.inserted, true) && Config.b("ttsInputEcho")) Speaker.echo(value.inserted)
+            if (!Voice.acceptSuccessfulWrite(value.inserted, true) && inputEchoOn) Speaker.echo(value.inserted)
             return
         }
         val previous = if (name == "commitText") composing.remove(ic) else composing[ic]
@@ -48,7 +61,7 @@ object TypingEcho {
             // 先交给语音事务处理，避免语音组字+确认又被普通输入路径重复朗读。
             if (name == "commitText" && old.text == after.text && previous?.validIn(old.text) == true &&
                 argument == previous.inserted && argument.isNotEmpty()) {
-                if (!Voice.acceptSuccessfulWrite(previous.inserted, true) && Config.b("ttsInputEcho"))
+                if (!Voice.acceptSuccessfulWrite(previous.inserted, true) && inputEchoOn)
                     Speaker.echo(previous.inserted)
             } else if (name == "commitText") Voice.acceptConfirmedCommit(argument)
             return
@@ -58,7 +71,7 @@ object TypingEcho {
         val confirmed = record.inserted
         if (name == "setComposingText") composing[ic] = record
         if (Voice.acceptSuccessfulWrite(confirmed, name == "commitText")) return
-        if (name == "commitText" && Config.b("ttsInputEcho")) Speaker.echo(confirmed)
+        if (name == "commitText" && inputEchoOn) Speaker.echo(confirmed)
     }
     private fun confirmedComposition(before: Snapshot, after: Snapshot, argument: String,
         previous: Composing?, actualDelta: String): Composing {
@@ -77,7 +90,7 @@ object TypingEcho {
         return Composing(at, actualDelta, after.text)
     }
     fun deleted(ic: InputConnection, before: Snapshot?) {
-        if (!enabled || !Config.b("ttsDeleteEcho") || before == null) return
+        if (!enabled || !deleteEchoOn || before == null || SystemClock.uptimeMillis() < suppressDeleteUntil) return
         if (deletion?.session != session || deletion?.connection !== ic) deletion = PendingDelete(session, ic, before)
         main.removeCallbacks(readDeletion)
         main.postDelayed(readDeletion, 90)
@@ -85,14 +98,23 @@ object TypingEcho {
     private val readDeletion = Runnable {
         val pending = deletion ?: return@Runnable
         deletion = null
-        if (!enabled || !Config.b("ttsDeleteEcho") || pending.session != session) return@Runnable
+        if (!enabled || !deleteEchoOn || pending.session != session || SystemClock.uptimeMillis() < suppressDeleteUntil) return@Runnable
         val after = snapshot(pending.connection) ?: return@Runnable
         val change = EchoTextChange.between(pending.before.text, after.text)
         if (change.removed.isEmpty() || change.inserted.isNotEmpty()) return@Runnable
         val n = change.removed.codePointCount(0, change.removed.length)
-        Speaker.echo(if (n <= 6) "已删除 ${change.removed.replace("\n", "换行")}" else "已删除 $n 个字")
+        val removedLabel = if (n == 1 && change.removed.length == 1) {
+            when (val ch = change.removed[0]) {
+                ' ' -> "空格"
+                '\n' -> "换行"
+                else -> Names.spoken(ch.toString())
+            }
+        } else {
+            change.removed.replace("\r\n", "\n").replace("\n", "换行")
+        }
+        Speaker.echo(GestureSpeechFormat.deleted(removedLabel, n))
     }
     fun voiceResult(text: String) {
-        if (enabled && InputPrivacy.mayRead() && Config.b("ttsVoiceEcho")) Speaker.echo(text)
+        if (enabled && InputPrivacy.mayRead() && voiceEchoOn) Speaker.echo(text)
     }
 }

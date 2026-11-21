@@ -33,10 +33,14 @@ class SettingsActivity : Activity() {
         const val STATE = "state"
         const val VOICE = "voice"
         const val SOUND = "sound"
+        const val SOUND_IMPORT = "sound_import"
         const val GESTURE = "gesture"
         const val EDITOPTS = "editopts"
+        const val SENTENCE_SYMBOLS = "sentence_symbols"
         const val WORDS = "words"
-        const val HELP = "help"
+        const val WORDS_IMPORT = "words_import"
+        const val BACKUP = "backup"
+        const val BACKUP_RESTORE = "backup_restore"
         const val ADVANCED = "advanced"
         const val PATCH_WIZARD = "patch"
 
@@ -57,8 +61,8 @@ class SettingsActivity : Activity() {
     var pad = 0
         private set
     private var page = HOME
-    private var launcherSwitch: Switch? = null
-    private var syncingLauncher = false
+    val currentPage: String get() = page
+    private var pausedOnce = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,11 +71,14 @@ class SettingsActivity : Activity() {
         ConfigSpec.migrateGestureDefaults(prefs)
         ConfigSpec.migrateEditOptions(prefs)
         autoOffLog()
+        AppStorage.ensureDirsIfPermitted(this)
         pad = (16 * resources.displayMetrics.density).toInt()
         page = when (val raw = intent.getStringExtra(EXTRA_PAGE) ?: HOME) {
             WORDS -> CANDIDATE
-            SOUND -> STATE
             else -> raw
+        }
+        if (page == HOME) {
+            runCatching { if (!Shortcut.shown(this)) Shortcut.setShown(this, true) }
         }
         build()
         if (page == HOME) {
@@ -82,15 +89,24 @@ class SettingsActivity : Activity() {
         }
     }
 
+    override fun onPause() {
+        pausedOnce = true
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
-        launcherSwitch?.let { syncLauncherSwitch(it) }
+        AppStorage.onResume(this)
         PatchWizardPage.onResume(this)
+        if (pausedOnce && page in setOf(CANDIDATE, STATE, SOUND, BACKUP)) {
+            build()
+        }
         // 使用须知还没同意时先不查状态，免得读屏读状态盖过须知
         if (page == HOME && Disclaimer.agreed(this)) send(ConfigSpec.CMD_STATUS)
     }
 
     override fun onDestroy() {
+        AppStorage.detach(this)
         PatchWizardPage.detach(this)
         WordTransfer.detach(this)
         SettingsBackup.detach(this)
@@ -110,13 +126,17 @@ class SettingsActivity : Activity() {
         CANDIDATE -> "候选与朗读"
         STATE -> "提示与震动"
         VOICE -> "语音播报"
-        SOUND -> "音效管理"
+        SOUND -> "自定义音效"
+        SOUND_IMPORT -> "导入音频"
         GESTURE -> "上半屏操作与手势"
         EDITOPTS -> "自定义编辑菜单"
+        SENTENCE_SYMBOLS -> "自定义分隔符号"
         WORDS -> "自定义解释词"
-        HELP -> "使用帮助"
+        WORDS_IMPORT -> "导入解释词"
+        BACKUP -> "备份与恢复"
+        BACKUP_RESTORE -> "恢复备份"
         ADVANCED -> "高级"
-        PATCH_WIZARD -> "一键安装与修补豆包"
+        PATCH_WIZARD -> "注入无障碍模块"
         else -> "豆包输入法无障碍模块"
     }
 
@@ -133,8 +153,14 @@ class SettingsActivity : Activity() {
                 addGroup(root, Group.INPUT)
                 root.addView(note("可切换抬手输入与标准输入"))
                 root.addView(heading("延迟调整"))
-                addGroup(root, Group.HOLD)
-                root.addView(note("提示：删除键长按可连续删除，空格键长按可开始语音输入，回车键短按发送，长按换行（需打开回车发送）"))
+                addKeys(root, "deleteHoldMs")
+                root.addView(note("删除键停留可连续删除"))
+                addKeys(root, "spaceHoldMs")
+                root.addView(note("空格键停留可开始语音输入"))
+                addKeys(root, "enterHoldMs")
+                root.addView(note("回车键短按发送，长按换行（需打开回车发送）"))
+                addKeys(root, "symbolScroll", "symbolScrollMs")
+                root.addView(note("开启符号区域停留翻页后，在数字、九键左侧符号区首尾停留可上下翻页，在符号键盘底部首尾停留可左右翻页"))
                 root.addView(heading("快速输入"))
                 addGroup(root, Group.FAST)
             }
@@ -154,9 +180,13 @@ class SettingsActivity : Activity() {
             }
             VOICE -> VoicePage.fill(this, root)
             SOUND -> SoundPage.manage(this, root)
+            SOUND_IMPORT -> SoundPage.fillImportList(this, root)
             GESTURE -> GesturePage.fill(this, root)
             EDITOPTS -> EditOptsPage.fill(this, root)
-            HELP -> HelpPage.fill(this, root)
+            SENTENCE_SYMBOLS -> GesturePage.fillSentenceSymbols(this, root)
+            WORDS_IMPORT -> WordTransfer.fillImportList(this, root)
+            BACKUP -> SettingsBackup.fill(this, root)
+            BACKUP_RESTORE -> SettingsBackup.fillRestoreList(this, root)
             ADVANCED -> advanced(root)
             PATCH_WIZARD -> PatchWizardPage.fill(this, root)
         }
@@ -177,13 +207,13 @@ class SettingsActivity : Activity() {
         fix.visibility = View.GONE
         fixButton = fix
         root.addView(fix)
-        root.addView(button("查询模块状态") { send(ConfigSpec.CMD_STATUS) })
+        root.addView(button("刷新模块状态") { send(ConfigSpec.CMD_STATUS) })
 
         root.addView(button("检查更新") { Updater.check(this, st) })
         patchEntryButton = entry(PATCH_WIZARD).also { root.addView(it) }
 
         root.addView(heading("设置"))
-        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, HELP, ADVANCED)) root.addView(entry(p))
+        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, BACKUP, ADVANCED)) root.addView(entry(p))
 
         root.addView(heading("关于"))
         root.addView(info("作者：$AUTHOR"))
@@ -249,17 +279,11 @@ class SettingsActivity : Activity() {
     private fun advanced(root: LinearLayout) {
         addGroup(root, Group.MAIN)
 
-        root.addView(heading("桌面图标"))
-        root.addView(launcherToggle())
-        root.addView(note("关闭后隐藏桌面图标，仍可从 LSPosed 或 LSPatch 的模块设置打开；重新开启或恢复默认即可显示图标。桌面可能稍后才刷新"))
-
-        SettingsBackup.fill(this, root)
-
         root.addView(heading("问题反馈"))
-        root.addView(note("遇到问题时：1. 打开“记录日志”；2. 回去重现一次问题；3. 回到这里点“复制日志”粘贴发给作者，日志很长就点“保存日志文件”，在 QQ 里把文件发给作者。"))
+        root.addView(note("日志保存目录：${AppStorage.displayDir(AppStorage.DIR_LOGS)}\n遇到问题时：1. 打开“记录日志”；2. 回去重现一次问题；3. 回到这里点“复制日志”粘贴发给作者，日志很长就点“保存日志文件”，把保存好的文件发给作者。"))
         addGroup(root, Group.LOG)
         root.addView(button("复制日志") { send(ConfigSpec.CMD_LOG_COPY) })
-        root.addView(button("保存日志文件") { send(ConfigSpec.CMD_LOG_SAVE) })
+        root.addView(button("保存日志文件") { AppStorage.ensurePermission(this) { saveLogToStorage() } })
         root.addView(button("清空日志") { send(ConfigSpec.CMD_LOG_CLEAR) })
 
         root.addView(heading("调试选项"))
@@ -283,15 +307,9 @@ class SettingsActivity : Activity() {
         root.addView(button("全部恢复默认") {
             AlertDialog.Builder(this)
                 .setTitle("恢复默认")
-                .setMessage("确定要把全部设置恢复默认吗？桌面图标会恢复显示，自定义解释词和已导入音频文件保留。")
+                .setMessage("确定要把全部设置恢复默认吗？自定义解释词和已导入音频文件保留。")
                 .setPositiveButton("确定") { _, _ ->
-                    try {
-                        Shortcut.setShown(this, true)
-                    } catch (t: Throwable) {
-                        Toast.makeText(this, "桌面图标恢复失败，未恢复其他设置：${t.message ?: t.javaClass.simpleName}", Toast.LENGTH_LONG).show()
-                        launcherSwitch?.let { syncLauncherSwitch(it) }
-                        return@setPositiveButton
-                    }
+                    runCatching { Shortcut.setShown(this, true) }
                     val e = prefs.edit()
                     for (item in ConfigSpec.items) e.remove(item.key)
                     for (item in ConfigSpec.intItems) e.remove(item.key)
@@ -307,53 +325,72 @@ class SettingsActivity : Activity() {
         })
     }
 
+    private fun saveLogToStorage() {
+        val token = NativeBackupUi.randomToken()
+        val progress = AlertDialog.Builder(this)
+            .setTitle("正在保存日志")
+            .setMessage("正在从豆包输入法导出日志文件…")
+            .setCancelable(false)
+            .create()
+        progress.show()
+        NativeBackupUi.sendNativeBroadcast(
+            a = this,
+            cmd = ConfigSpec.CMD_LOG_SAVE,
+            token = token,
+            includeClipboard = false,
+        ) { ok, msg ->
+            if (!ok) {
+                io.github.doubaoa11y.SettingsProvider.cleanupXfer(this, token)
+                runCatching { progress.dismiss() }
+                if (!isFinishing && !isDestroyed) {
+                    AlertDialog.Builder(this)
+                        .setTitle("保存日志失败")
+                        .setMessage(msg)
+                        .setPositiveButton("知道了", null)
+                        .show()
+                }
+                return@sendNativeBroadcast
+            }
+            Thread({
+                val outcome = runCatching {
+                    val src = io.github.doubaoa11y.SettingsProvider.xferFile(this, token)
+                    check(src != null && src.isFile) { "未收到日志文件" }
+                    val dest = AppStorage.uniqueFile(AppStorage.logsDir(), "豆包无障碍日志_${AppStorage.timestamp()}", "txt")
+                    java.io.FileInputStream(src).use { input ->
+                        java.io.FileOutputStream(dest).use { out ->
+                            input.copyTo(out, 32 * 1024)
+                            out.flush()
+                        }
+                    }
+                    dest
+                }
+                io.github.doubaoa11y.SettingsProvider.cleanupXfer(this, token)
+                runOnUiThread {
+                    runCatching { progress.dismiss() }
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    outcome.fold(
+                        onSuccess = { dest ->
+                            val extra = if (msg.isNotBlank() && msg != "操作已完成") "\n$msg" else ""
+                            AlertDialog.Builder(this)
+                                .setTitle("日志已保存")
+                                .setMessage("已保存到：${AppStorage.displayPath(dest)}$extra")
+                                .setPositiveButton("知道了", null)
+                                .show()
+                        },
+                        onFailure = { t ->
+                            AlertDialog.Builder(this)
+                                .setTitle("保存日志失败")
+                                .setMessage(t.message ?: "无法写入日志文件")
+                                .setPositiveButton("知道了", null)
+                                .show()
+                        },
+                    )
+                }
+            }, "SaveLogFile").start()
+        }
+    }
+
     // ---------------- 控件 ----------------
-
-    private fun syncLauncherSwitch(toggle: Switch): Boolean {
-        syncingLauncher = true
-        return try {
-            toggle.isChecked = Shortcut.shown(this)
-            toggle.isEnabled = true
-            true
-        } catch (t: Throwable) {
-            toggle.isEnabled = false
-            val msg = "无法读取桌面图标当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：${t.message ?: t.javaClass.simpleName}"
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-            false
-        } finally {
-            syncingLauncher = false
-        }
-    }
-
-    private fun launcherToggle(): Switch = Switch(this).apply {
-        text = "显示桌面图标"
-        setPadding(0, pad / 2, 0, pad / 2)
-        launcherSwitch = this
-        syncLauncherSwitch(this)
-        setOnCheckedChangeListener { _, checked ->
-            if (syncingLauncher) return@setOnCheckedChangeListener
-            if (!checked) {
-                syncLauncherSwitch(this)
-                AlertDialog.Builder(this@SettingsActivity).setTitle("隐藏桌面图标？")
-                    .setMessage("隐藏后可从 LSPosed 或 LSPatch 的模块设置重新打开，并恢复桌面图标。")
-                    .setPositiveButton("隐藏") { _, _ ->
-                        try { Shortcut.setShown(this@SettingsActivity, false) }
-                        catch (_: Throwable) { toast("隐藏桌面图标失败") }
-                        syncLauncherSwitch(this)
-                    }.setNegativeButton("取消", null).show()
-                return@setOnCheckedChangeListener
-            }
-            val msg = try {
-                Shortcut.setShown(this@SettingsActivity, checked)
-                if (checked) "已显示桌面图标" else "已隐藏桌面图标，可从 LSPosed 或 LSPatch 的模块设置打开"
-            } catch (t: Throwable) {
-                "修改桌面图标失败：${t.message ?: t.javaClass.simpleName}"
-            }
-            syncLauncherSwitch(this)
-            Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
-            announceForAccessibility(msg)
-        }
-    }
 
     /** 把一组的开关和选择项按定义顺序加进去：开关在前（下面一行是提示），选择项在后 */
     private fun addGroup(parent: LinearLayout, g: Group) {
@@ -523,9 +560,15 @@ class SettingsActivity : Activity() {
     @Deprecated("系统文件选择器结果")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (AppStorage.onActivityResult(this, requestCode)) return
         if (WordTransfer.onResult(this, requestCode, resultCode, data?.data)) return
         if (SoundPage.onResult(this, requestCode, resultCode, data?.data)) return
         SettingsBackup.onResult(this, requestCode, resultCode, data?.data)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        AppStorage.onPermissionResult(this, requestCode)
     }
 
     /** 把全部设置值（和可选命令）发给豆包进程；用有序广播拿回执 */
@@ -566,7 +609,7 @@ class SettingsActivity : Activity() {
                             else -> resultData
                         }
                     } else {
-                        "模块没有生效。可能是还没修补豆包，或者没有弹出过输入法界面。请点击“一键安装与修补豆包”。或者在任意编辑框弹出一次输入法界面。"
+                        "模块没有生效。可能是还没修补豆包，或者没有弹出过输入法界面。请点击“注入无障碍模块”。或者在任意编辑框弹出一次输入法界面。"
                     }
                     val st = status
                     if (st != null) {
@@ -584,7 +627,7 @@ class SettingsActivity : Activity() {
                             if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.ORIGINAL ||
                                 kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.NOT_INSTALLED
                             ) {
-                                showFix("一键安装与修补豆包", isPatchShortcut = true) {
+                                showFix("注入无障碍模块", isPatchShortcut = true) {
                                     startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                                 }
                             } else if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&

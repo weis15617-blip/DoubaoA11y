@@ -51,18 +51,54 @@ object ReaderControl {
             true
         }
     } catch (t: Throwable) { L.hookError("ReaderControl.restore", t); false }
+    private val proxyUri = android.net.Uri.parse("content://${io.github.doubaoa11y.ConfigSpec.SETTINGS_AUTHORITY}/config")
+
+    private fun canSeePackage(c: Context, pkg: String): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 30) return true
+        return try {
+            c.packageManager.getPackageInfo(pkg, 0)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun sendViaProxy(c: Context, pkg: String, on: Boolean): Boolean = try {
+        c.contentResolver.call(
+            proxyUri,
+            "readerControl",
+            null,
+            android.os.Bundle().apply {
+                putString("pkg", pkg)
+                putBoolean("on", on)
+            }
+        )?.getBoolean("applied", false) == true
+    } catch (_: Throwable) {
+        false
+    }
+
     private fun send(pkg: String, on: Boolean): Boolean = try {
         val c = context
         if (c == null) false else {
-            if (pkg == "com.dianming.phoneapp") {
+            val viaProxy: Boolean
+            if (!canSeePackage(c, pkg)) {
+                check(sendViaProxy(c, pkg, on)) { "模块代理未能向 $pkg 发送控制请求" }
+                viaProxy = true
+            } else if (pkg == "com.dianming.phoneapp") {
                 val i = Intent("com.dianming.phoneapp.SpeakServiceForApp").setPackage(pkg)
                     .putExtra("TouchExplorationMode", if (on) 1 else 0).putExtra("notifyInput", true)
-                check(c.startService(i) != null) { "点明没有接受控制服务请求" }
+                if (c.startService(i) != null) {
+                    viaProxy = false
+                } else {
+                    check(sendViaProxy(c, pkg, on)) { "点明没有接受控制服务请求" }
+                    viaProxy = true
+                }
             } else {
                 c.sendBroadcast(Intent("com.bjbyhd.action.TOUCH_EXPLORATION").setPackage(pkg)
                     .putExtra("exploration_state", on).addFlags(Intent.FLAG_RECEIVER_FOREGROUND))
+                viaProxy = false
             }
-            L.i("读屏接口请求：$pkg ${if (on) "恢复触摸浏览" else "直接触摸"}；响应以实际事件为准")
+            L.i("读屏接口请求${if (viaProxy) "（代理）" else ""}：$pkg ${if (on) "恢复触摸浏览" else "直接触摸"}；响应以实际事件为准")
             true
         }
     } catch (t: Throwable) { L.hookError("ReaderControl.request", t); false }

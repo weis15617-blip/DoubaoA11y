@@ -92,7 +92,6 @@ object ToolboxPager {
 
     /** 让小圆点进到读屏的焦点列表里：容器本身算一个控件，里面的圆点不单独算 */
     fun prepare(panel: View) {
-        if (CustomToolbar.isPanel(panel)) CustomToolbar.ensureOptionBlock(panel)
         val ind = findIndicator(panel) ?: return
         val (cur, count) = pageInfo(panel) ?: return
         if (count <= 1) return

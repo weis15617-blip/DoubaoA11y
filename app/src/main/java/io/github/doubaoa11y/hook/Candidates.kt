@@ -32,18 +32,37 @@ object Candidates {
     private var listKey = ""
 
     private val origin = CandidateOriginState()
+    @Volatile
+    private var lastTypingAt = 0L
+    @Volatile
+    private var suppressSpeakUntil = 0L
     /** 必须属于当前输入会话；无拼音串仅凭手写/实际组字或按键+引擎证据兜底。 */
     val composing: Boolean get() = origin.isOpen() && current.any { it.isNotBlank() }
     fun hasCandidates(): Boolean = composing
+    fun suppressSpeakFor(ms: Long) { suppressSpeakUntil = android.os.SystemClock.uptimeMillis() + ms }
     fun prev(): Boolean { if (!composing) return false; move(-1); return true }
     fun next(): Boolean { if (!composing) return false; move(1); return true }
-    fun commit(): Boolean = composing && VirtualKeys.tapKeyNamed("空格")
-    fun markTyping() { Voice.onManualInput(); origin.input(CandidateOriginState.Input.KEY) }
-    fun markHandwriting() { Voice.onManualInput(); origin.input(CandidateOriginState.Input.HANDWRITING) }
+    fun commit(): Boolean = composing && (commitSelected() || VirtualKeys.tapKeyNamed("空格"))
+    fun markTyping() {
+        lastTypingAt = android.os.SystemClock.uptimeMillis()
+        suppressSpeakUntil = 0L
+        Voice.onManualInput()
+        origin.input(CandidateOriginState.Input.KEY)
+    }
+    fun markHandwriting() {
+        lastTypingAt = android.os.SystemClock.uptimeMillis()
+        suppressSpeakUntil = 0L
+        Voice.onManualInput()
+        origin.input(CandidateOriginState.Input.HANDWRITING)
+    }
     fun onCursorMove() { origin.cursorMoved(); clearView("光标移动") }
     fun onDelete() { reset("删除候选") }
     fun onExternalSelection(hasComposingRegion: Boolean) {
-        if (!hasComposingRegion && engineTyping() != true) onCursorMove()
+        if (hasComposingRegion || engineTyping() == true) return
+        // 刚抬手输入按键时，合成的 ACTION_UP（40ms 后）和引擎快照还在路上；
+        // 此时到达的异步 onUpdateSelection 多半来自上一笔删除/上屏，不能误判为移光标而挡掉新按键的候选。
+        if (android.os.SystemClock.uptimeMillis() - lastTypingAt < 200L) return
+        onCursorMove()
     }
     private var queryFailureLogged = false
     fun engineTyping(): Boolean? = try {
@@ -149,30 +168,29 @@ object Candidates {
     }
 
     /** 新快照到了：如果在等加载更多，选中第一个新候选并朗读 */
-    private fun afterLoad(old: List<String>, list: List<String>) {
+    private fun afterLoad(old: List<String>, list: List<String>, firstNew: Int) {
         loadingFrom = null
         main.removeCallbacksAndMessages(loadToken)
-        // 一般是在原来的后面接上；不是的话，从第一个不在原来里面的开始
-        val n = if (list.size > old.size && list.subList(0, old.size) == old) old.size
-        else list.indexOfFirst { it !in old }
-        if (n < 0 || n >= list.size) {
+        if (firstNew < 0 || firstNew >= list.size) {
             L.i("加载更多后没有新候选（${list.size} 个）")
-            Speaker.speak("已到头，" + CharWords.candidate(old[old.size - 1]))
+            if (old.isNotEmpty()) Speaker.speak("已到头，" + CharWords.candidate(old[old.size - 1]))
             sel = (list.size - 1).coerceAtLeast(0)
             return
         }
-        sel = n
-        L.i("加载更多后切换到第${n + 1}个「${list[n]}」，共 ${list.size} 个")
-        Speaker.speak(CharWords.candidate(list[n]))
+        sel = firstNew
+        Sound.play("scroll")
+        L.i("加载更多后切换到第${firstNew + 1}个「${list[firstNew]}」，共 ${list.size} 个（引擎序号 ${engineIdx.firstOrNull()}..${engineIdx.lastOrNull()}）")
+        Speaker.speak(CharWords.candidate(list[firstNew]))
     }
 
-    /** 空格：选了别的候选就上屏那个；还是第一个就照常按空格 */
+    /** 空格：选了别的候选就上屏那个；还是第一个（引擎序号 0）就照常按空格 */
     private fun commitSelected(): Boolean {
         val i = sel
-        if (i <= 0 || i >= current.size) return false
+        if (i < 0 || i >= current.size) return false
+        val e = engineIdx.getOrElse(i) { i }
+        if (i == 0 && e <= 0) return false
         val j = JniHooks.jni() ?: return false
         return try {
-            val e = engineIdx.getOrElse(i) { i }
             L.i("空格上屏第${i + 1}个候选「${current[i]}」，引擎序号 $e")
             de.robv.android.xposed.XposedHelpers.callMethod(j, "selectCand", e)
             sel = 0
@@ -242,41 +260,65 @@ object Candidates {
         }
         // 删空时可能收到空数组或 null；也可能仅剩“手写找字”等非候选入口。
         // 必须同时撤掉翻页等待和延迟朗读，避免旧候选继续影响空格、标点。
-        if (!origin.snapshot(py.isNotBlank(), list.any { it.isNotBlank() }, engineTyping())) {
+        val typingNow = engineTyping()
+        if (!origin.snapshot(py.isNotBlank(), list.any { it.isNotBlank() }, typingNow)) {
+            if (py.isNotBlank() || list.any { it.isNotBlank() }) {
+                L.i("忽略非当前输入会话候选（py=$py，首项=${list.firstOrNull().orEmpty()}，引擎组字=$typingNow）")
+            }
             clearView("无当前输入会话的候选")
             return
         }
         (args.getOrNull(0) as? Long)?.let { snapId = it }
         val oldPy = pinyin
-        current = list
-        engineIdx = eng
-        pinyin = py
-        val lk = py + "|" + list.joinToString("|")
+        val prevList = current
+        val prevEng = engineIdx
+        val lk = py + "|" + eng.joinToString(",") + "|" + list.joinToString("|")
         val waiting = loadingFrom
         if (lk != listKey) {
             listKey = lk
-            sel = 0
-            if (waiting != null) {
-                if (py == oldPy && composing) afterLoad(waiting, list) else loadingFrom = null
+            if (waiting != null && py == oldPy) {
+                val merged = CandidatePages.merge(prevList, prevEng, list, eng, hasEngineIdx = idx != null)
+                current = merged.items
+                engineIdx = merged.engineIdx
+                pinyin = py
+                if (composing) afterLoad(waiting, merged.items, merged.firstNew) else loadingFrom = null
+            } else {
+                if (waiting != null) {
+                    loadingFrom = null
+                    main.removeCallbacksAndMessages(loadToken)
+                }
+                current = list
+                engineIdx = eng
+                pinyin = py
+                sel = 0
             }
         }
         if (waiting != null && py == oldPy) return
         if (!VirtualKeys.enabled || !Config.b("speakCandidate")) return
+        if (android.os.SystemClock.uptimeMillis() < suppressSpeakUntil) return
         val first = list.firstOrNull { it.isNotBlank() } ?: return
         val key = "$py|$first"
         if (key == last) return
         last = key
         val text = CharWords.candidate(first)
-        // 稍等一下，让读屏先读完编辑框里拼音的变化，再读候选
         main.removeCallbacksAndMessages(token)
         // 这期间手指已经摸到下一个键：不读了，免得插在下一个键的朗读后面
         if (VirtualKeys.movedOnSinceTap()) {
             L.i("已摸到下一个键，不读候选「$first」")
             return
         }
-        main.postAtTime({
-            if (VirtualKeys.movedOnSinceTap()) L.i("已摸到下一个键，不读候选「$first」")
-            else Speaker.speak(text)
-        }, token, android.os.SystemClock.uptimeMillis() + 120)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            L.i("朗读候选「$first」（py=$py）")
+            Speaker.speak(text)
+        } else {
+            main.postAtTime({
+                if (android.os.SystemClock.uptimeMillis() < suppressSpeakUntil) return@postAtTime
+                if (VirtualKeys.movedOnSinceTap()) L.i("已摸到下一个键，不读候选「$first」")
+                else {
+                    L.i("朗读候选「$first」（py=$py）")
+                    Speaker.speak(text)
+                }
+            }, token, android.os.SystemClock.uptimeMillis())
+        }
     }
 }

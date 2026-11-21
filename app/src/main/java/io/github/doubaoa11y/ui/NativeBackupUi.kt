@@ -35,7 +35,7 @@ object NativeBackupUi {
     private val main = Handler(Looper.getMainLooper())
     private val dialogs = WeakHashMap<SettingsActivity, AlertDialog>()
 
-    private data class Preview(
+    internal data class Preview(
         val tempZip: File,
         val doubaoVersionName: String,
         val doubaoVersionCode: Long,
@@ -43,6 +43,34 @@ object NativeBackupUi {
         val fileCount: Int,
         val totalBytes: Long
     )
+
+    internal fun inspectNativeZip(zipFile: File): Preview {
+        var manifestText: String? = null
+        ZipInputStream(FileInputStream(zipFile)).use { zis ->
+            while (true) {
+                val e = zis.nextEntry ?: break
+                if (!e.isDirectory && e.name == "manifest.json") {
+                    manifestText = String(zis.readBytes(), Charsets.UTF_8)
+                    break
+                }
+                zis.closeEntry()
+            }
+        }
+        val raw = manifestText ?: error("无效的豆包原生设置备份（缺少 manifest.json）")
+        val j = JSONObject(raw)
+        require(j.optInt("formatVersion", -1) == 1) { "不支持的豆包原生备份格式版本" }
+        require(j.optString("packageName") == ConfigSpec.TARGET_PACKAGE) { "该备份不是豆包输入法原生备份" }
+        val fileCount = j.optInt("fileCount", j.optJSONArray("files")?.length() ?: 0)
+        require(fileCount > 0) { "豆包原生备份中没有可恢复的文件" }
+        return Preview(
+            tempZip = zipFile,
+            doubaoVersionName = j.optString("doubaoVersionName", "未知"),
+            doubaoVersionCode = j.optLong("doubaoVersionCode", 0L),
+            timestamp = j.optLong("timestamp", 0L),
+            fileCount = fileCount,
+            totalBytes = j.optLong("totalBytes", zipFile.length())
+        )
+    }
 
     fun detach(a: SettingsActivity) {
         dialogs.remove(a)?.dismiss()
@@ -292,7 +320,7 @@ object NativeBackupUi {
         }, "NativeBackupStageCopy").start()
     }
 
-    private fun queryRestoreStatus(a: SettingsActivity) {
+    internal fun queryRestoreStatus(a: SettingsActivity) {
         val progress = showProgress(a, "正在查询", "正在向豆包输入法查询上次恢复状态…")
         sendNativeBroadcast(
             a = a,
@@ -302,12 +330,12 @@ object NativeBackupUi {
         ) { ok, msg ->
             dismissProgress(a, progress)
             if (!a.isFinishing && !a.isDestroyed) {
-                showAlert(a, if (ok) "原生恢复状态" else "查询失败", msg)
+                showAlert(a, if (ok) "豆包原生恢复状态" else "查询失败", msg)
             }
         }
     }
 
-    private fun sendNativeBroadcast(
+    internal fun sendNativeBroadcast(
         a: SettingsActivity,
         cmd: String,
         token: String,
@@ -381,7 +409,7 @@ object NativeBackupUi {
         }
     }
 
-    private fun openDoubaoAppDetails(a: SettingsActivity) {
+    internal fun openDoubaoAppDetails(a: SettingsActivity) {
         try {
             a.startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ConfigSpec.TARGET_PACKAGE}"))
@@ -391,7 +419,7 @@ object NativeBackupUi {
         }
     }
 
-    private fun readInstalledDoubaoVersion(a: SettingsActivity): String {
+    internal fun readInstalledDoubaoVersion(a: SettingsActivity): String {
         return try {
             val pi = a.packageManager.getPackageInfo(ConfigSpec.TARGET_PACKAGE, 0)
             pi.versionName ?: ""
@@ -400,7 +428,7 @@ object NativeBackupUi {
         }
     }
 
-    private fun randomToken(): String {
+    internal fun randomToken(): String {
         val bytes = ByteArray(16)
         SecureRandom().nextBytes(bytes)
         val sb = StringBuilder(32)

@@ -4,8 +4,8 @@ package io.github.doubaoa11y.hook
 object TouchGuard {
     val isPaused: Boolean get() = ReaderControl.requested
     val needsLiftToType: Boolean get() = false
-    fun pause() { TatansBridge.update("全屏区域"); ReaderControl.sync() }
-    fun resume(why: String) { ReaderControl.sync(); TatansBridge.clearPassThrough(why); TatansBridge.update(why) }
+    fun pause() { TatansBridge.refresh("全屏区域"); ReaderControl.sync() }
+    fun resume(why: String) { ReaderControl.sync(); TatansBridge.clearPassThrough(why); TatansBridge.refresh(why) }
     fun syncPanel() { TatansBridge.update("面板变化"); ReaderControl.sync(); ModuleEntries.toolbar() }
     fun describe(): String = when (A11yState.readerPackage) {
         "com.bjbyhd.voiceback", "com.bjbyhd.screenreader", "com.dianming.phoneapp" -> ReaderControl.describe()

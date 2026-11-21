@@ -41,6 +41,10 @@ object JniHooks {
                 if (A11yState.recording && Config.b("logJni")) {
                     L.i("JNI $name/${p.args.size}参 线程=${Thread.currentThread().name} ${Fmt.args(p.args)}")
                 }
+                if (name == "showToast" && A11yState.recording) {
+                    val msg = p.args.firstOrNull { it is CharSequence && it.isNotBlank() }?.toString()?.trim()
+                    if (!msg.isNullOrEmpty()) KeyboardOps.onToolbarTip(msg)
+                }
             }))
         }
 
@@ -48,6 +52,19 @@ object JniHooks {
         Hooker.byName(c, "onCandidateBarCandidateLoadMore", SafeHook("KeyboardJni.loadMore", before = { p ->
             if (A11yState.recording && Config.b("logJni")) L.i("JNI onCandidateBarCandidateLoadMore ${Fmt.args(p.args)}")
         }))
+
+        // 空格长按在语音启动前取消后，拦住原生层迟到的 StartAsrOnSpaceLPress，避免卡住语音面板
+        val intType = Int::class.javaPrimitiveType!!
+        val spaceAsrGuard = SafeHook("space.cancelAsr", before = { p ->
+            if (A11yState.recording && VirtualKeys.shouldBlockSpaceAsr()) {
+                L.i("拦截已取消的空格长按语音 StartAsrOnSpaceLPress")
+                p.result = null
+            }
+        })
+        if (!Hooker.method(c, "StartAsrOnSpaceLPress", arrayOf(intType, intType), spaceAsrGuard)) {
+            L.w("StartAsrOnSpaceLPress(int, int) 未命中，降级按方法名拦截")
+            Hooker.byName(c, "StartAsrOnSpaceLPress", spaceAsrGuard)
+        }
 
         // 候选栏更新：朗读第一个候选
         Hooker.byName(c, "notifyCandidateBarSnapshot", SafeHook("candidate.speak", after = { p ->
