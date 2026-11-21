@@ -41,6 +41,7 @@ class SettingsActivity : Activity() {
         const val WORDS_IMPORT = "words_import"
         const val BACKUP = "backup"
         const val BACKUP_RESTORE = "backup_restore"
+        const val SPONSOR = "sponsor"
         const val ADVANCED = "advanced"
         const val PATCH_WIZARD = "patch"
 
@@ -135,6 +136,7 @@ class SettingsActivity : Activity() {
         WORDS_IMPORT -> "导入解释词"
         BACKUP -> "备份与恢复"
         BACKUP_RESTORE -> "恢复备份"
+        SPONSOR -> "赞赏支持"
         ADVANCED -> "高级"
         PATCH_WIZARD -> "注入无障碍模块"
         else -> "豆包输入法无障碍模块"
@@ -187,6 +189,7 @@ class SettingsActivity : Activity() {
             WORDS_IMPORT -> WordTransfer.fillImportList(this, root)
             BACKUP -> SettingsBackup.fill(this, root)
             BACKUP_RESTORE -> SettingsBackup.fillRestoreList(this, root)
+            SPONSOR -> SponsorPage.fill(this, root)
             ADVANCED -> advanced(root)
             PATCH_WIZARD -> PatchWizardPage.fill(this, root)
         }
@@ -213,7 +216,7 @@ class SettingsActivity : Activity() {
         patchEntryButton = entry(PATCH_WIZARD).also { root.addView(it) }
 
         root.addView(heading("设置"))
-        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, BACKUP, ADVANCED)) root.addView(entry(p))
+        for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, BACKUP, SPONSOR, ADVANCED)) root.addView(entry(p))
 
         root.addView(heading("关于"))
         root.addView(info("作者：$AUTHOR"))
