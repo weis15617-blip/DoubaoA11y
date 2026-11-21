@@ -1,0 +1,108 @@
+name: Sync Update Manifest
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Generate data/update.json from latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess, urllib.request
+
+          repo = os.environ["REPO"]
+          token = os.environ["GH_TOKEN"]
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/releases/latest",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "User-Agent": "DoubaoA11y-sync-update-json",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as resp:
+              rel = json.loads(resp.read().decode("utf-8"))
+
+          tag = rel.get("tag_name", "").strip()
+          version = tag.lstrip("vV")
+          body = (rel.get("body") or "").strip()
+
+          apk_asset = None
+          for asset in rel.get("assets") or []:
+              if (asset.get("name") or "").lower().endswith(".apk"):
+                  apk_asset = asset
+                  break
+
+          apk_url = apk_asset.get("browser_download_url", "") if apk_asset else ""
+          apk_size = int(apk_asset.get("size") or 0) if apk_asset else 0
+          sha256 = ""
+          if apk_asset:
+              digest = apk_asset.get("digest") or ""
+              if digest.startswith("sha256:") and len(digest) == 71:
+                  sha256 = digest.split(":", 1)[1].lower()
+              elif apk_url:
+                  h = hashlib.sha256()
+                  with urllib.request.urlopen(apk_url, timeout=60) as dl:
+                      while True:
+                          chunk = dl.read(65536)
+                          if not chunk:
+                              break
+                          h.update(chunk)
+                  sha256 = h.hexdigest()
+
+          version_code = 0
+          for ref in (tag, "HEAD"):
+              try:
+                  spec = subprocess.check_output(
+                      ["git", "show", f"{ref}:app/src/main/java/io/github/doubaoa11y/ConfigSpec.kt"],
+                      stderr=subprocess.DEVNULL,
+                  ).decode("utf-8")
+                  m = re.search(r"const\s+val\s+MODULE_VERSION_CODE\s*=\s*(\d+)", spec)
+                  if m:
+                      version_code = int(m.group(1))
+                      break
+              except Exception:
+                  pass
+
+          data = {
+              "version": version,
+              "versionCode": version_code,
+              "notes": body,
+              "apkSize": apk_size,
+              "sha256": sha256,
+              "apkUrls": [apk_url] if apk_url else [],
+          }
+
+          os.makedirs("data", exist_ok=True)
+          with open("data/update.json", "w", encoding="utf-8", newline="\n") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          PY
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet data/update.json; then
+            echo "data/update.json unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/update.json
+          git commit -m "chore: 自动同步 data/update.json"
+          git push origin main

@@ -1,0 +1,10 @@
+{
+  "version": "1.2.0",
+  "versionCode": 46,
+  "notes": "适配豆包输入法 1.5.5，接入解说快速输入，九键候选左右移，豆包设置界面无障碍优化，修复编辑面板连点与朗读插队等问题。",
+  "apkSize": 865298,
+  "sha256": "076af46d9b6deea71e45b62203feaee094a93bddf9136ef8de50d62ad6fad396",
+  "apkUrls": [
+    "https://github.com/zzzttt1573/DoubaoA11y/releases/download/v1.2.0/DoubaoA11y-1.2.0.apk"
+  ]
+}

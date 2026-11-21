@@ -27,29 +27,64 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 检查更新：读 GitHub 仓库最新的 Release，有新版就下载模块 apk，用系统安装器安装。
- * 只连 GitHub（api.github.com 和 Release 附件的下载地址），不收集、不上传任何信息。
+ * 检查更新：优先通过多源 CDN（jsDelivr / GitHub Raw）拉取仓库的 data/update.json（国内响应快、无 API 限流），
+ * 全部失败时自动回退到 GitHub Releases API；下载 APK 支持多线路回退和 SHA-256 校验，不收集、不上传任何信息。
  */
 object Updater {
     private const val REPO = "zzzttt1573/DoubaoA11y"
+    private const val UPDATE_PATH = "data/update.json"
+    private val UPDATE_URLS = listOf(
+        "https://fastly.jsdelivr.net/gh/$REPO@main/$UPDATE_PATH",
+        "https://gcore.jsdelivr.net/gh/$REPO@main/$UPDATE_PATH",
+        "https://cdn.jsdelivr.net/gh/$REPO@main/$UPDATE_PATH",
+        "https://raw.githubusercontent.com/$REPO/main/$UPDATE_PATH",
+    )
     private const val API = "https://api.github.com/repos/$REPO/releases/latest"
     const val RELEASES_PAGE = "https://github.com/$REPO/releases/latest"
     private const val ACTION_INSTALLED = "io.github.doubaoa11y.UPDATE_INSTALLED"
+    private const val MAX_MANIFEST_BYTES = 256 * 1024
 
     private val main = Handler(Looper.getMainLooper())
 
-    private class Release(val version: String, val notes: String, val apkUrl: String?, val apkSize: Long)
+    private class Release(
+        val version: String,
+        val versionCode: Int,
+        val notes: String,
+        val apkUrls: List<String>,
+        val apkSize: Long,
+        val sha256: String,
+    )
 
-    /** 版本号比较："1.1.10" > "1.1.9" */
+    private fun parseVersion(raw: String): Pair<List<Int>, Boolean> {
+        val cleaned = raw.trim().removePrefix("v").removePrefix("V")
+        val match = Regex("^([0-9]+(?:\\.[0-9]+)*)(.*)$").find(cleaned)
+        if (match == null) {
+            val fallback = cleaned.split('.', '-').map { it.toIntOrNull() ?: 0 }
+            return fallback to false
+        }
+        val nums = match.groupValues[1].split('.').map { it.toIntOrNull() ?: 0 }
+        val suffix = match.groupValues[2].trim()
+        val preRelease = suffix.isNotEmpty()
+        return nums to preRelease
+    }
+
+    /** 版本号比较："1.1.10" > "1.1.9"；同主版本时正式版 "2.0.0" > 测试版 "2.0.0Beta" */
     fun newer(a: String, b: String): Boolean {
-        val x = a.trim().removePrefix("v").split('.', '-').map { it.toIntOrNull() ?: 0 }
-        val y = b.trim().removePrefix("v").split('.', '-').map { it.toIntOrNull() ?: 0 }
+        val (x, preA) = parseVersion(a)
+        val (y, preB) = parseVersion(b)
         for (i in 0 until maxOf(x.size, y.size)) {
             val p = x.getOrElse(i) { 0 }
             val q = y.getOrElse(i) { 0 }
             if (p != q) return p > q
         }
-        return false
+        return !preA && preB
+    }
+
+    private fun isNewer(r: Release): Boolean {
+        if (r.versionCode > 0 && r.versionCode != ConfigSpec.MODULE_VERSION_CODE) {
+            return r.versionCode > ConfigSpec.MODULE_VERSION_CODE
+        }
+        return newer(r.version, ConfigSpec.MODULE_VERSION_NAME)
     }
 
     private fun say(act: Activity, status: TextView, msg: String) {
@@ -130,11 +165,11 @@ object Updater {
                         .setPositiveButton("复制QQ群号") { _, _ -> copyQq(act) }
                         .setNegativeButton("关闭", null)
                         .show().also { say(act, status, "检查更新失败") }
-                    !newer(r.version, ConfigSpec.MODULE_VERSION_NAME) -> {
+                    !isNewer(r) -> {
                         say(act, status, "已是最新版本 ${ConfigSpec.MODULE_VERSION_NAME}")
                         AlertDialog.Builder(act)
                             .setTitle("已是最新版本")
-                            .setMessage("当前版本 ${ConfigSpec.MODULE_VERSION_NAME}，GitHub 上最新的是 ${r.version}，不用更新。")
+                            .setMessage("当前版本 ${ConfigSpec.MODULE_VERSION_NAME}，最新发布版本为 ${r.version}，不用更新。")
                             .setPositiveButton("确定", null)
                             .show()
                     }
@@ -145,10 +180,73 @@ object Updater {
     }
 
     private fun fetch(cancelled: AtomicBoolean, connRef: AtomicReference<HttpURLConnection?>): Release {
+        for (urlStr in UPDATE_URLS) {
+            if (cancelled.get()) error("已取消")
+            val r = runCatching { fetchManifest(urlStr, cancelled, connRef) }.getOrNull()
+            if (r != null) return r
+        }
+        if (cancelled.get()) error("已取消")
+        return fetchFromGitHubApi(cancelled, connRef)
+    }
+
+    private fun fetchManifest(
+        urlStr: String,
+        cancelled: AtomicBoolean,
+        connRef: AtomicReference<HttpURLConnection?>,
+    ): Release {
+        val c = URL(urlStr).openConnection() as HttpURLConnection
+        connRef.set(c)
+        c.connectTimeout = 4000
+        c.readTimeout = 4000
+        c.useCaches = false
+        c.setRequestProperty("User-Agent", "DoubaoA11y/${ConfigSpec.MODULE_VERSION_NAME}")
+        c.setRequestProperty("Cache-Control", "no-cache")
+        try {
+            if (cancelled.get()) error("已取消")
+            if (c.responseCode != 200) error("HTTP ${c.responseCode}")
+            val baos = java.io.ByteArrayOutputStream()
+            c.inputStream.use { input ->
+                val buf = ByteArray(4096)
+                var total = 0
+                while (true) {
+                    if (cancelled.get()) error("已取消")
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > MAX_MANIFEST_BYTES) error("清单过大")
+                    baos.write(buf, 0, n)
+                }
+            }
+            val j = JSONObject(baos.toString("UTF-8").removePrefix("\uFEFF"))
+            val version = j.optString("version", "").trim().removePrefix("v").removePrefix("V")
+            require(version.isNotEmpty()) { "缺少版本号" }
+            val versionCode = j.optInt("versionCode", 0)
+            val notes = j.optString("notes", "")
+            val size = j.optLong("apkSize", 0L)
+            val sha256 = j.optString("sha256", "").trim().lowercase()
+                .takeIf { it.matches(Regex("^[a-f0-9]{64}$")) }.orEmpty()
+            val urls = LinkedHashSet<String>()
+            val arr = j.optJSONArray("apkUrls")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val u = arr.optString(i, "").trim()
+                    if (u.startsWith("https://")) urls.add(u)
+                }
+            }
+            val single = j.optString("apkUrl", "").trim()
+            if (single.startsWith("https://")) urls.add(single)
+            return Release(version, versionCode, notes, urls.toList(), size, sha256)
+        } finally {
+            connRef.compareAndSet(c, null)
+            c.disconnect()
+        }
+    }
+
+    private fun fetchFromGitHubApi(cancelled: AtomicBoolean, connRef: AtomicReference<HttpURLConnection?>): Release {
         val c = URL(API).openConnection() as HttpURLConnection
         connRef.set(c)
-        c.connectTimeout = 15000
-        c.readTimeout = 15000
+        c.connectTimeout = 8000
+        c.readTimeout = 10000
         c.setRequestProperty("Accept", "application/vnd.github+json")
         c.setRequestProperty("User-Agent", "DoubaoA11y-updater")
         try {
@@ -156,19 +254,26 @@ object Updater {
             if (c.responseCode != 200) error("HTTP ${c.responseCode}")
             val j = JSONObject(c.inputStream.bufferedReader().readText())
             val assets = j.optJSONArray("assets")
-            var url: String? = null
+            val urls = ArrayList<String>()
             var size = 0L
+            var sha256 = ""
             if (assets != null) {
                 for (i in 0 until assets.length()) {
                     val a = assets.getJSONObject(i)
                     if (a.optString("name").endsWith(".apk", true)) {
-                        url = a.optString("browser_download_url")
+                        val u = a.optString("browser_download_url", "").trim()
+                        if (u.startsWith("https://")) urls.add(u)
                         size = a.optLong("size")
+                        val digest = a.optString("digest", "").trim()
+                        if (digest.startsWith("sha256:", true)) {
+                            sha256 = digest.substring(7).lowercase()
+                                .takeIf { it.matches(Regex("^[a-f0-9]{64}$")) }.orEmpty()
+                        }
                         break
                     }
                 }
             }
-            return Release(j.optString("tag_name").removePrefix("v"), j.optString("body"), url, size)
+            return Release(j.optString("tag_name").removePrefix("v").removePrefix("V"), 0, j.optString("body"), urls, size, sha256)
         } finally {
             connRef.compareAndSet(c, null)
             c.disconnect()
@@ -184,7 +289,7 @@ object Updater {
             .setMessage("当前 ${ConfigSpec.MODULE_VERSION_NAME}，最新 ${r.version}$size。\n\n" +
                 "更新完成后，一定要强行停止一次豆包输入法，新版本才会生效。\n\n$notes")
             .setNegativeButton("以后再说", null)
-        if (r.apkUrl != null) b.setPositiveButton("下载并安装") { _, _ -> download(act, status, r) }
+        if (r.apkUrls.isNotEmpty()) b.setPositiveButton("下载并安装") { _, _ -> download(act, status, r) }
         else b.setPositiveButton("用浏览器打开下载页") { _, _ -> openPage(act) }
         b.show()
     }
@@ -243,28 +348,50 @@ object Updater {
         }
 
         Thread {
-            val ok = try {
-                save(r.apkUrl!!, file, cancelled, connRef) { pct, done, total ->
+            var ok = false
+            var lastErr = ""
+            for ((idx, apkUrl) in r.apkUrls.withIndex()) {
+                if (cancelled.get()) break
+                if (idx > 0) {
                     main.post {
-                        if (act.isFinishing || cancelled.get()) return@post
-                        if (total > 0) {
-                            bar.isIndeterminate = false
-                            bar.progress = pct
-                            val doneMb = "%.1f".format(done / 1048576.0)
-                            val totalMb = "%.1f".format(total / 1048576.0)
-                            msgView.text = "正在下载 $pct%（$doneMb MB / $totalMb MB）"
-                            status.text = "更新：正在下载 ${r.version}，$pct%"
-                        } else {
+                        if (!act.isFinishing && !cancelled.get()) {
                             bar.isIndeterminate = true
-                            val doneMb = "%.1f".format(done / 1048576.0)
-                            msgView.text = "正在下载（已下载 $doneMb MB）"
-                            status.text = "更新：正在下载 ${r.version}…"
+                            msgView.text = "正在切换备用线路下载（第 ${idx + 1}/${r.apkUrls.size} 条）…"
                         }
                     }
                 }
-                true
-            } catch (t: Throwable) {
-                false
+                val attemptOk = try {
+                    try { file.delete() } catch (_: Throwable) {}
+                    save(apkUrl, file, cancelled, connRef) { pct, done, total ->
+                        main.post {
+                            if (act.isFinishing || cancelled.get()) return@post
+                            if (total > 0) {
+                                bar.isIndeterminate = false
+                                bar.progress = pct
+                                val doneMb = "%.1f".format(done / 1048576.0)
+                                val totalMb = "%.1f".format(total / 1048576.0)
+                                msgView.text = "正在下载 $pct%（$doneMb MB / $totalMb MB）"
+                                status.text = "更新：正在下载 ${r.version}，$pct%"
+                            } else {
+                                bar.isIndeterminate = true
+                                val doneMb = "%.1f".format(done / 1048576.0)
+                                msgView.text = "正在下载（已下载 $doneMb MB）"
+                                status.text = "更新：正在下载 ${r.version}…"
+                            }
+                        }
+                    }
+                    if (r.sha256.isNotEmpty() && !verifySha256(file, r.sha256)) {
+                        error("安装包校验失败")
+                    }
+                    true
+                } catch (t: Throwable) {
+                    lastErr = t.message.orEmpty()
+                    false
+                }
+                if (attemptOk) {
+                    ok = true
+                    break
+                }
             }
             main.post {
                 try { if (dialog.isShowing) dialog.dismiss() } catch (_: Throwable) {}
@@ -274,9 +401,10 @@ object Updater {
                 }
                 if (!ok) {
                     try { file.delete() } catch (_: Throwable) {}
+                    val reason = if (lastErr == "安装包校验失败") "安装包 SHA-256 校验未通过。" else "下载中断了。"
                     AlertDialog.Builder(act)
                         .setTitle("下载失败")
-                        .setMessage("下载中断了。可以再试一次，或者加入QQ群获取最新版。\n$QQ_LINE")
+                        .setMessage("${reason}可以再试一次，或者加入QQ群获取最新版。\n$QQ_LINE")
                         .setPositiveButton("复制QQ群号") { _, _ -> copyQq(act) }
                         .setNegativeButton("关闭", null)
                         .show()
@@ -287,6 +415,20 @@ object Updater {
                 install(act, status, file)
             }
         }.start()
+    }
+
+    private fun verifySha256(file: File, expectedHex: String): Boolean {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        val actual = md.digest().joinToString("") { "%02x".format(it) }
+        return actual.equals(expectedHex, ignoreCase = true)
     }
 
     private fun save(
