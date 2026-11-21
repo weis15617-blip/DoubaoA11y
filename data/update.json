@@ -1,10 +1,10 @@
 {
-  "version": "1.2.0",
-  "versionCode": 46,
-  "notes": "适配豆包输入法 1.5.5，接入解说快速输入，九键候选左右移，豆包设置界面无障碍优化，修复编辑面板连点与朗读插队等问题。",
-  "apkSize": 865298,
-  "sha256": "076af46d9b6deea71e45b62203feaee094a93bddf9136ef8de50d62ad6fad396",
+  "version": "2.0.0",
+  "versionCode": 47,
+  "notes": "2.0.0 重磅更新：内置免 Root 一键注入无障碍模块向导、适配豆包输入法 1.5.6、新增上半屏手势与自定义编辑菜单、独立 TTS 语音播报与自制音效系统、恢复并升级符号区域停留上下/左右翻页、手机存储根目录统一文件夹与双应用单压缩包备份恢复、重构设置界面、升级多源检查更新并新增赞赏支持页。",
+  "apkSize": 6901979,
+  "sha256": "6e1aaa7351ec638b95dde8a3d28f3bf6fc3b4981272d271c4fd467348ea188f8",
   "apkUrls": [
-    "https://github.com/zzzttt1573/DoubaoA11y/releases/download/v1.2.0/DoubaoA11y-1.2.0.apk"
+    "https://github.com/zzzttt1573/DoubaoA11y/releases/download/v2.0.0/DoubaoA11y-2.0.0.apk"
   ]
 }
