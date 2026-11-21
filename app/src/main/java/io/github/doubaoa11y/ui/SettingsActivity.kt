@@ -213,7 +213,10 @@ class SettingsActivity : Activity() {
         root.addView(button("刷新模块状态") { send(ConfigSpec.CMD_STATUS) })
 
         root.addView(button("检查更新") { Updater.check(this, st) })
-        patchEntryButton = entry(PATCH_WIZARD).also { root.addView(it) }
+        patchEntryButton = entry(PATCH_WIZARD).also {
+            it.visibility = View.GONE
+            root.addView(it)
+        }
 
         root.addView(heading("设置"))
         for (p in listOf(INPUT, GESTURE, CANDIDATE, VOICE, STATE, BACKUP, SPONSOR, ADVANCED)) root.addView(entry(p))
@@ -224,18 +227,18 @@ class SettingsActivity : Activity() {
         root.addView(button("访问我的github仓库地址") { open(GITHUB) })
     }
 
-    /** 首页状态下面的解决按钮：豆包里是旧版模块、或者读屏没开时出现 */
-    private fun showFix(label: String, isPatchShortcut: Boolean = false, onClick: () -> Unit) {
+    /** 首页状态下面的解决按钮：仅检测到模块异常、版本不匹配或读屏未开时出现 */
+    private fun showFix(label: String, showPatchEntry: Boolean = false, onClick: () -> Unit) {
         val b = fixButton ?: return
         b.text = label
         b.setOnClickListener { onClick() }
         b.visibility = View.VISIBLE
-        patchEntryButton?.visibility = if (isPatchShortcut) View.GONE else View.VISIBLE
+        patchEntryButton?.visibility = if (showPatchEntry) View.VISIBLE else View.GONE
     }
 
     private fun hideFix() {
         fixButton?.visibility = View.GONE
-        patchEntryButton?.visibility = View.VISIBLE
+        patchEntryButton?.visibility = View.GONE
     }
 
     /** 豆包里运行的模块版本和本应用不一样：多半是更新后没有强行停止豆包 */
@@ -249,11 +252,11 @@ class SettingsActivity : Activity() {
         when {
             running != ConfigSpec.MODULE_VERSION_CODE || mismatchEmbedded -> {
                 if (localIntegrated) {
-                    showFix("一键同步新版模块到豆包", isPatchShortcut = true) {
+                    showFix("一键同步新版模块到豆包", showPatchEntry = false) {
                         startActivity(Intent(this, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                     }
                 } else {
-                    showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this) }
+                    showFix("去强行停止豆包输入法", showPatchEntry = true) { Updater.openDoubaoInfo(this) }
                 }
                 if (!staleWarned && !isFinishing && running != ConfigSpec.MODULE_VERSION_CODE) {
                     staleWarned = true
@@ -630,17 +633,17 @@ class SettingsActivity : Activity() {
                             if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.ORIGINAL ||
                                 kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.NOT_INSTALLED
                             ) {
-                                showFix("注入无障碍模块", isPatchShortcut = true) {
+                                showFix("注入无障碍模块", showPatchEntry = false) {
                                     startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                                 }
                             } else if (kind == io.github.doubaoa11y.patch.ApkPatcher.PatchKind.LOCAL_INTEGRATED &&
                                 !doubaoStatus.embeddedModuleMatchesCurrent
                             ) {
-                                showFix("一键同步新版模块到豆包", isPatchShortcut = true) {
+                                showFix("一键同步新版模块到豆包", showPatchEntry = false) {
                                     startActivity(Intent(this@SettingsActivity, SettingsActivity::class.java).putExtra(EXTRA_PAGE, PATCH_WIZARD))
                                 }
                             } else {
-                                showFix("去强行停止豆包输入法") { Updater.openDoubaoInfo(this@SettingsActivity) }
+                                showFix("去强行停止豆包输入法", showPatchEntry = true) { Updater.openDoubaoInfo(this@SettingsActivity) }
                             }
                         }
                     } else if (ok && cmd != null) {
@@ -656,6 +659,7 @@ class SettingsActivity : Activity() {
             }, null, RESULT_CANCELED, null, null)
         } catch (t: Throwable) {
             status?.text = "当前版本 ${ConfigSpec.MODULE_VERSION_NAME}\n状态：发送失败 ${t.message}"
+            patchEntryButton?.visibility = View.VISIBLE
         }
     }
 }
