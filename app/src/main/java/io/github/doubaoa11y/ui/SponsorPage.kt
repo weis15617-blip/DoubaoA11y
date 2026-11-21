@@ -34,12 +34,11 @@ object SponsorPage {
     private const val MAX_BYTES = 256 * 1024
     private const val REPO = "zzzttt1573/DoubaoA11y"
     private const val DATA_PATH = "data/sponsors.json"
-
-    private val URLS = listOf(
+    private const val RAW_URL = "https://raw.githubusercontent.com/$REPO/main/$DATA_PATH"
+    private val CDN_URLS = listOf(
         "https://fastly.jsdelivr.net/gh/$REPO@main/$DATA_PATH",
         "https://gcore.jsdelivr.net/gh/$REPO@main/$DATA_PATH",
         "https://cdn.jsdelivr.net/gh/$REPO@main/$DATA_PATH",
-        "https://raw.githubusercontent.com/$REPO/main/$DATA_PATH",
     )
 
     private val main = Handler(Looper.getMainLooper())
@@ -188,40 +187,86 @@ object SponsorPage {
         return runCatching { parse(raw) }.getOrNull()
     }
 
-    private fun fetchRemote(): Pair<String, SponsorData>? {
-        for (urlStr in URLS) {
-            val res = runCatching {
-                val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 4000
-                    readTimeout = 4000
-                    useCaches = false
-                    setRequestProperty("User-Agent", "DoubaoA11y/${ConfigSpec.MODULE_VERSION_NAME}")
-                    setRequestProperty("Cache-Control", "no-cache")
-                }
-                try {
-                    if (conn.responseCode != 200) return@runCatching null
-                    val baos = ByteArrayOutputStream()
-                    conn.inputStream.use { input ->
-                        val buf = ByteArray(4096)
-                        var total = 0
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            total += n
-                            if (total > MAX_BYTES) return@runCatching null
-                            baos.write(buf, 0, n)
-                        }
+    private fun fetchOne(urlStr: String, timeoutMs: Int): Pair<String, SponsorData>? {
+        return runCatching {
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                useCaches = false
+                setRequestProperty("User-Agent", "DoubaoA11y/${ConfigSpec.MODULE_VERSION_NAME}")
+                setRequestProperty("Cache-Control", "no-cache")
+            }
+            try {
+                if (conn.responseCode != 200) return@runCatching null
+                val baos = ByteArrayOutputStream()
+                conn.inputStream.use { input ->
+                    val buf = ByteArray(4096)
+                    var total = 0
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_BYTES) return@runCatching null
+                        baos.write(buf, 0, n)
                     }
-                    val raw = baos.toString("UTF-8")
-                    val data = parse(raw)
-                    raw to data
-                } finally {
-                    conn.disconnect()
                 }
-            }.getOrNull()
-            if (res != null) return res
+                val raw = baos.toString("UTF-8")
+                val data = parse(raw)
+                raw to data
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    private fun fetchRemote(): Pair<String, SponsorData>? {
+        val lock = Object()
+        var freshRes: Pair<String, SponsorData>? = null
+        var cdnRes: Pair<String, SponsorData>? = null
+        var freshDone = false
+        var cdnDone = false
+
+        Thread({
+            val res = fetchOne(RAW_URL, 3500)
+            synchronized(lock) {
+                freshRes = res
+                freshDone = true
+                lock.notifyAll()
+            }
+        }, "SponsorFresh").start()
+
+        Thread({
+            var res: Pair<String, SponsorData>? = null
+            for (u in CDN_URLS) {
+                if (freshDone && freshRes != null) break
+                res = fetchOne(u, 3500)
+                if (res != null) break
+            }
+            synchronized(lock) {
+                cdnRes = res
+                cdnDone = true
+                lock.notifyAll()
+            }
+        }, "SponsorCdn").start()
+
+        val startMs = System.currentTimeMillis()
+        return synchronized(lock) {
+            while (true) {
+                val f = freshRes
+                val c = cdnRes
+                if (freshDone && f != null) return@synchronized f
+                if (freshDone && cdnDone) return@synchronized (f ?: c)
+                val elapsed = System.currentTimeMillis() - startMs
+                if (cdnDone && c != null && elapsed >= 2000L) return@synchronized (f ?: c)
+                if (elapsed >= 10000L) return@synchronized (f ?: c)
+                try {
+                    lock.wait(150L)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            freshRes ?: cdnRes
         }
-        return null
     }
 
     private fun parse(raw: String): SponsorData {

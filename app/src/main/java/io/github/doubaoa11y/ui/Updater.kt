@@ -33,11 +33,11 @@ import java.util.concurrent.atomic.AtomicReference
 object Updater {
     private const val REPO = "zzzttt1573/DoubaoA11y"
     private const val UPDATE_PATH = "data/update.json"
-    private val UPDATE_URLS = listOf(
+    private const val RAW_UPDATE_URL = "https://raw.githubusercontent.com/$REPO/main/$UPDATE_PATH"
+    private val CDN_UPDATE_URLS = listOf(
         "https://fastly.jsdelivr.net/gh/$REPO@main/$UPDATE_PATH",
         "https://gcore.jsdelivr.net/gh/$REPO@main/$UPDATE_PATH",
         "https://cdn.jsdelivr.net/gh/$REPO@main/$UPDATE_PATH",
-        "https://raw.githubusercontent.com/$REPO/main/$UPDATE_PATH",
     )
     private const val API = "https://api.github.com/repos/$REPO/releases/latest"
     const val RELEASES_PAGE = "https://github.com/$REPO/releases/latest"
@@ -179,25 +179,117 @@ object Updater {
         }.start()
     }
 
+    private fun pickNewer(primary: Release?, secondary: Release?): Release? {
+        if (primary == null) return secondary
+        if (secondary == null) return primary
+        if (primary.versionCode > 0 && secondary.versionCode > 0 && primary.versionCode != secondary.versionCode) {
+            return if (primary.versionCode > secondary.versionCode) primary else secondary
+        }
+        return when {
+            newer(primary.version, secondary.version) -> primary
+            newer(secondary.version, primary.version) -> secondary
+            else -> primary
+        }
+    }
+
+    /**
+     * 并发拉取直连源（GitHub Raw -> GitHub API）与国内 CDN（jsDelivr）：
+     * - 直连源成功时立即采用并取版本更高者，彻底避免 CDN 边缘旧缓存覆盖最新版；
+     * - 国内直连受限时最多等待 2.5 秒即返回 CDN 结果，兼顾速度与实时性。
+     */
     private fun fetch(cancelled: AtomicBoolean, connRef: AtomicReference<HttpURLConnection?>): Release {
-        for (urlStr in UPDATE_URLS) {
-            if (cancelled.get()) error("已取消")
-            val r = runCatching { fetchManifest(urlStr, cancelled, connRef) }.getOrNull()
-            if (r != null) return r
+        val lock = Object()
+        val activeConns = java.util.Collections.synchronizedList(ArrayList<HttpURLConnection>())
+        val freshRef = AtomicReference<Release?>(null)
+        val cdnRef = AtomicReference<Release?>(null)
+        var freshDone = false
+        var cdnDone = false
+
+        fun track(c: HttpURLConnection?) {
+            if (c != null) {
+                activeConns.add(c)
+                connRef.set(c)
+            }
+        }
+
+        val freshThread = Thread({
+            val localConn = AtomicReference<HttpURLConnection?>(null)
+            val res = try {
+                runCatching { fetchManifest(RAW_UPDATE_URL, cancelled, localConn, 3500, ::track) }.getOrNull()
+                    ?: if (!cancelled.get()) runCatching { fetchFromGitHubApi(cancelled, localConn, ::track) }.getOrNull() else null
+            } finally {
+                localConn.get()?.let { activeConns.remove(it) }
+            }
+            synchronized(lock) {
+                freshRef.set(res)
+                freshDone = true
+                lock.notifyAll()
+            }
+        }, "UpdaterFresh")
+
+        val cdnThread = Thread({
+            val localConn = AtomicReference<HttpURLConnection?>(null)
+            var res: Release? = null
+            try {
+                for (urlStr in CDN_UPDATE_URLS) {
+                    if (cancelled.get() || freshDone && freshRef.get() != null) break
+                    res = runCatching { fetchManifest(urlStr, cancelled, localConn, 3500, ::track) }.getOrNull()
+                    if (res != null) break
+                }
+            } finally {
+                localConn.get()?.let { activeConns.remove(it) }
+            }
+            synchronized(lock) {
+                cdnRef.set(res)
+                cdnDone = true
+                lock.notifyAll()
+            }
+        }, "UpdaterCdn")
+
+        val startMs = System.currentTimeMillis()
+        freshThread.start()
+        cdnThread.start()
+
+        val result = synchronized(lock) {
+            while (true) {
+                if (cancelled.get()) break
+                val fresh = freshRef.get()
+                val cdn = cdnRef.get()
+                if (freshDone && fresh != null) return@synchronized pickNewer(fresh, cdn)
+                if (freshDone && cdnDone) return@synchronized pickNewer(fresh, cdn)
+                val elapsed = System.currentTimeMillis() - startMs
+                if (cdnDone && cdn != null && elapsed >= 2500L) return@synchronized pickNewer(fresh, cdn)
+                if (elapsed >= 12000L) return@synchronized pickNewer(fresh, cdn)
+                val waitMs = if (cdnDone && cdn != null) (2500L - elapsed).coerceIn(50L, 200L) else 200L
+                try {
+                    lock.wait(waitMs)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            null
+        }
+        // 清理仍在进行的备用连接
+        val snapshot = synchronized(activeConns) { activeConns.toList() }
+        if (snapshot.isNotEmpty()) {
+            Thread { for (c in snapshot) try { c.disconnect() } catch (_: Throwable) {} }.start()
         }
         if (cancelled.get()) error("已取消")
-        return fetchFromGitHubApi(cancelled, connRef)
+        return result ?: error("检查更新失败")
     }
 
     private fun fetchManifest(
         urlStr: String,
         cancelled: AtomicBoolean,
         connRef: AtomicReference<HttpURLConnection?>,
+        timeoutMs: Int = 4000,
+        onConnect: (HttpURLConnection) -> Unit = {},
     ): Release {
         val c = URL(urlStr).openConnection() as HttpURLConnection
         connRef.set(c)
-        c.connectTimeout = 4000
-        c.readTimeout = 4000
+        onConnect(c)
+        c.connectTimeout = timeoutMs
+        c.readTimeout = timeoutMs
         c.useCaches = false
         c.setRequestProperty("User-Agent", "DoubaoA11y/${ConfigSpec.MODULE_VERSION_NAME}")
         c.setRequestProperty("Cache-Control", "no-cache")
@@ -242,11 +334,16 @@ object Updater {
         }
     }
 
-    private fun fetchFromGitHubApi(cancelled: AtomicBoolean, connRef: AtomicReference<HttpURLConnection?>): Release {
+    private fun fetchFromGitHubApi(
+        cancelled: AtomicBoolean,
+        connRef: AtomicReference<HttpURLConnection?>,
+        onConnect: (HttpURLConnection) -> Unit = {},
+    ): Release {
         val c = URL(API).openConnection() as HttpURLConnection
         connRef.set(c)
-        c.connectTimeout = 8000
-        c.readTimeout = 10000
+        onConnect(c)
+        c.connectTimeout = 5000
+        c.readTimeout = 6000
         c.setRequestProperty("Accept", "application/vnd.github+json")
         c.setRequestProperty("User-Agent", "DoubaoA11y-updater")
         try {
