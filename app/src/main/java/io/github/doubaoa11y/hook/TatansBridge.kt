@@ -572,8 +572,10 @@ object TatansBridge {
                 readerEventsSuppressed = true
                 L.i("天坦读屏触摸穿透（$why）：${Fmt.rect(r)}，屏蔽读屏文本/选区事件")
             } else {
-                if (currentSuppressed) resetTatansSuppression(b)
+                // 面板打开或退出全屏时：先撤穿透，再退全屏抑制态，再补撤一次穿透，防止天坦残留整屏透传导致无法左右滑切焦点
                 transactPassThrough(b, r)
+                if (currentSuppressed || r.isEmpty) resetTatansSuppression(b)
+                if (r.isEmpty) transactPassThrough(b, r)
                 current.set(r)
                 currentSuppressed = false
                 readerEventsSuppressed = false

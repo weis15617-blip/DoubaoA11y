@@ -545,6 +545,7 @@ class GestureLayer(ctx: Context) : View(ctx) {
      * 必须先确认用户不是双击；其余（朗读、移动、切换选项）抬手就做。
      */
     private fun tapDelayNeeded(): Boolean {
+        if (ClipboardNav.hasPending()) return true
         if (Config.b("fsCandidateFirst") && !EditOptions.isFresh() &&
             Candidates.hasCandidates() && !EditActions.isSelecting
         ) return true
@@ -646,6 +647,23 @@ class GestureLayer(ctx: Context) : View(ctx) {
          */
         fun fireSlot(slot: Int, how: String, double: Boolean = false) {
             if (!FullscreenMode.wanted || !FullscreenMode.active) return
+            // 刚执行过“上一个/下一个剪贴板”：
+            // - 紧接着单指双击 → 直接把刚获取的那条剪贴板粘贴到编辑框；
+            // - 紧接着再次切换剪贴板 → 保留待粘贴状态继续切换；
+            // - 其他任意手势 → 自动退出待粘贴状态，走正常手势流程。
+            if (ClipboardNav.hasPending()) {
+                val slotAction = GestureMap.actionOf(slot)
+                if (slot == ConfigSpec.G_SINGLE_DOUBLE_TAP) {
+                    if (Config.b("fsHaptic")) Haptic.tick()
+                    val ok = ClipboardNav.pastePending()
+                    if (ok) Sound.play("double") else Sound.play("boundary")
+                    lastAt = SystemClock.uptimeMillis()
+                    return
+                }
+                if (slotAction != ConfigSpec.ACT_PREV_CLIPBOARD && slotAction != ConfigSpec.ACT_NEXT_CLIPBOARD) {
+                    ClipboardNav.clearPending()
+                }
+            }
             // 候选优先：候选栏有候选的时候，左右滑切候选、上滑清空、下滑/单击/双击上屏。
             //
             // 前提是这批候选**是打字带出来的**（Candidates.fromTyping）：移动光标（上一句、下一句、

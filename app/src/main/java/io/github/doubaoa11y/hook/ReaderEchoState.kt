@@ -36,8 +36,17 @@ class CandidateOriginState {
     private var open = false
     private var residual = false
     private var moved = false
-    fun input(source: Input) { pending = source; moved = false }
-    fun cursorMoved() { clear(); moved = true }
+    fun input(source: Input) {
+        // 光标移动之后（例如英文键盘光标移进已有单词内部，豆包自动重新组字并弹联想），
+        // 被动回调的 COMPOSING 不能解除“刚移过光标”的隔离，必须由真实按键或手写重新开启会话。
+        if (moved && source == Input.COMPOSING) return
+        pending = source
+        moved = false
+    }
+    fun isMoved(): Boolean = moved
+    fun cursorMoved() { clearSession(); moved = true }
+    /** 只清本次组字会话，保留 moved（防止移光标期间豆包先发空组字再重框单词时把 moved 洗掉） */
+    fun clearSession() { pending = null; open = false; residual = false }
     fun clear() { pending = null; open = false; residual = false; moved = false }
     fun committed() { residual = residual || open; pending = null; open = false }
     fun snapshot(hasPinyin: Boolean, hasCandidates: Boolean, engineTyping: Boolean?): Boolean {
@@ -160,30 +169,18 @@ object SelectionOverrideTiming {
     fun fallbackMs(afterSelMs: Long): Long = afterSelMs + 90L
 }
 
-/** 手势反馈统一文案格式：涉及文字的操作一律先念文字/数量，再念“已xx”。 */
+/** 手势反馈统一文案格式：涉及文字的操作一律先念完整文字，再念“已xx”。 */
 object GestureSpeechFormat {
     fun selected(text: String): String = if (text.isEmpty()) "" else "${text}已选中"
     fun deselected(text: String): String = if (text.isEmpty()) "" else "${text}已取消"
     fun deleted(text: String, count: Int): String = when {
-        text.isNotEmpty() && count <= 6 -> "${text}已删除"
+        text.isNotEmpty() -> "${text}已删除"
         count > 0 -> "${count}个字已删除"
         else -> "已删除"
     }
-    fun copied(text: String, count: Int): String = when {
-        text.isEmpty() -> "已复制"
-        count <= 24 -> "${text}已复制"
-        else -> "${text.take(24)}等${count}个字已复制"
-    }
-    fun cut(text: String, count: Int): String = when {
-        text.isEmpty() -> "已剪切"
-        count <= 24 -> "${text}已剪切"
-        else -> "${text.take(24)}等${count}个字已剪切"
-    }
-    fun pasted(text: String, count: Int): String = when {
-        text.isEmpty() -> "已粘贴"
-        count <= 24 -> "${text}已粘贴"
-        else -> "${text.take(24)}等${count}个字已粘贴"
-    }
+    fun copied(text: String, count: Int): String = if (text.isEmpty()) "已复制" else "${text}已复制"
+    fun cut(text: String, count: Int): String = if (text.isEmpty()) "已剪切" else "${text}已剪切"
+    fun pasted(text: String, count: Int): String = if (text.isEmpty()) "已粘贴" else "${text}已粘贴"
     fun cleared(count: Int): String = if (count > 0) "${count}个字已清空" else "已清空"
 }
 

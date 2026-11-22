@@ -237,12 +237,28 @@ object ApkPatcher {
         val slimModule = File(outDir, "module_slim.apk")
         buildSlimModuleApk(context, slimModule)
 
+        val t0 = System.currentTimeMillis()
+        PatchLog.i(
+            context,
+            "开始修补豆包：kind=${st.kind} version=${st.versionName}(${st.versionCode}) " +
+                "base=${baseApk.length() / (1024 * 1024)}MB splits=${st.splitApks.size} " +
+                "device=${PatchLog.deviceSummary(context)}"
+        )
         return try {
-            if (st.kind == PatchKind.LOCAL_INTEGRATED) {
+            val out = if (st.kind == PatchKind.LOCAL_INTEGRATED) {
                 hotUpdateModule(context, st, baseApk, slimModule, material, outDir, onProgress)
             } else {
                 fullPatch(context, st, baseApk, slimModule, material, outDir, onProgress)
             }
+            PatchLog.i(
+                context,
+                "修补完成（耗时 ${(System.currentTimeMillis() - t0) / 1000.0}s）：" +
+                    "hotUpdate=${out.isHotUpdate} base=${out.baseApk.length() / (1024 * 1024)}MB splits=${out.splitApks.size}"
+            )
+            out
+        } catch (t: Throwable) {
+            PatchLog.e(context, "修补豆包失败", t)
+            throw t
         } finally {
             slimModule.delete()
         }
@@ -584,7 +600,8 @@ object ApkPatcher {
             .setV1SigningEnabled(true)
             .setV2SigningEnabled(true)
             .setV3SigningEnabled(true)
-            .setMinSdkVersion(26)
+            // 使用 21 强制同时写出 V1 + V2 + V3 签名，避免旧版安卓或国产安全扫描器要求 V1 校验失败
+            .setMinSdkVersion(21)
             .build()
             .sign()
     }

@@ -387,8 +387,11 @@ object ReaderBridge {
             if (!transactPassThrough(b, fullRect)) return false
             return transactPerformAction(b, ACTION_IME_EXPANDED)
         }
-        if (lastSuppressed) resetTatansSuppression(b)
-        return transactPassThrough(b, rect)
+        // 面板打开或撤掉穿透时：先撤穿透、再退出全屏抑制态、再补撤一次，避免天坦仍停留在全屏透传模式
+        val ok1 = transactPassThrough(b, rect)
+        if (lastSuppressed || rect.isEmpty) resetTatansSuppression(b)
+        val ok2 = if (rect.isEmpty) transactPassThrough(b, rect) else ok1
+        return ok1 && ok2
     }
 
     private fun resetTatansSuppression(b: IBinder) {

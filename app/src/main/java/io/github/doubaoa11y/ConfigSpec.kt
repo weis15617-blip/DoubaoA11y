@@ -9,8 +9,8 @@ package io.github.doubaoa11y
  */
 object ConfigSpec {
     /** 模块自己的版本（build.gradle.kts 从这里读） */
-    const val MODULE_VERSION_CODE = 47
-    const val MODULE_VERSION_NAME = "2.0.0"
+    const val MODULE_VERSION_CODE = 48
+    const val MODULE_VERSION_NAME = "2.0.1"
 
     const val TARGET_PACKAGE = "com.bytedance.android.doubaoime"
     /** 已适配的豆包版本：版本号 -> 版本名 */
@@ -298,6 +298,9 @@ object ConfigSpec {
     const val ACT_SWITCH_SCREEN = 50
     // 菜单内的“智能整理”
     const val ACT_SMART_ORGANIZE = 51
+    // 切换剪贴板历史（带序号朗读，紧接着双击可直接粘贴）
+    const val ACT_PREV_CLIPBOARD = 52
+    const val ACT_NEXT_CLIPBOARD = 53
 
     /**
      * 动作表：id 到名字。设置页和豆包进程都用这一份。
@@ -327,6 +330,8 @@ object ConfigSpec {
         ACT_DELETE_RIGHT to "向后删除",
         ACT_CLEAR_TEXT to "清空文本",
         ACT_PASTE to "粘贴",
+        ACT_PREV_CLIPBOARD to "上一个剪贴板",
+        ACT_NEXT_CLIPBOARD to "下一个剪贴板",
         ACT_SEND to "执行发送",
         ACT_SEND_AND_HIDE to "发送并收起键盘",
         ACT_HIDE to "收起键盘",

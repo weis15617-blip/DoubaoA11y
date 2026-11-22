@@ -53,7 +53,7 @@ class SettingsProvider : ContentProvider() {
             }
             "speak" -> Bundle().apply {
                 val text = extras?.getString("text").orEmpty()
-                require(text.length <= 4000)
+                require(text.length <= 200_000)
                 val enabled = p.getBoolean("moduleOn", true) && !p.getBoolean("speakByReader", true)
                 putBoolean("accepted", enabled && SpeechEngine.speak(ctx, p, text))
             }
@@ -124,11 +124,23 @@ class SettingsProvider : ContentProvider() {
     }
     override fun openFile(uri: Uri, mode: String): android.os.ParcelFileDescriptor? {
         val ctx = context ?: return null
+        val segments = uri.pathSegments
+        // 允许系统安装器通过本应用签发的一次性令牌只读打开修补版豆包 APK（用于 Android 8–13 通用 ACTION_VIEW 安装）
+        if (segments.size == 2 && segments[0] == "patched_apk") {
+            if (mode.contains('w')) throw SecurityException("安装包仅允许只读访问")
+            val f = resolvePatchedApk(segments[1]) ?: throw SecurityException("安装包访问令牌已失效")
+            val identity = Binder.clearCallingIdentity()
+            return try {
+                if (!f.isFile) throw java.io.FileNotFoundException("未找到待安装的修补包")
+                android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
+        }
         val uid = Binder.getCallingUid()
         val allowed = uid == Process.myUid() ||
             ctx.packageManager.getPackagesForUid(uid)?.contains(ConfigSpec.TARGET_PACKAGE) == true
         if (!allowed) throw SecurityException("不允许访问模块中转文件")
-        val segments = uri.pathSegments
         if (segments.size != 2 || segments[0] != "native_xfer") {
             throw IllegalArgumentException("无效中转路径")
         }
@@ -152,14 +164,58 @@ class SettingsProvider : ContentProvider() {
             Binder.restoreCallingIdentity(identity)
         }
     }
-    override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = null
-    override fun getType(uri: Uri): String? = null
+    override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
+        val segments = uri.pathSegments
+        if (segments.size == 2 && segments[0] == "patched_apk") {
+            val f = resolvePatchedApk(segments[1]) ?: return null
+            if (!f.isFile) return null
+            val cols = projection ?: arrayOf(
+                android.provider.OpenableColumns.DISPLAY_NAME,
+                android.provider.OpenableColumns.SIZE,
+            )
+            val row = arrayOfNulls<Any>(cols.size)
+            for (i in cols.indices) {
+                row[i] = when (cols[i]) {
+                    android.provider.OpenableColumns.DISPLAY_NAME -> "DoubaoA11y_patched.apk"
+                    android.provider.OpenableColumns.SIZE -> f.length()
+                    else -> null
+                }
+            }
+            return android.database.MatrixCursor(cols, 1).apply { addRow(row) }
+        }
+        return null
+    }
+    override fun getType(uri: Uri): String? {
+        val segments = uri.pathSegments
+        if (segments.size == 2 && segments[0] == "patched_apk" && resolvePatchedApk(segments[1]) != null) {
+            return "application/vnd.android.package-archive"
+        }
+        return null
+    }
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?) = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
     companion object {
         val URI: Uri = Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config")
         private val TOKEN_RE = Regex("^[a-f0-9]{16,64}$")
+        private val apkGrantLock = Any()
+        private var activeApkToken: String? = null
+        private var activeApkFile: java.io.File? = null
+
+        fun issuePatchedApkUri(apkFile: java.io.File): Uri {
+            val bytes = ByteArray(16)
+            java.security.SecureRandom().nextBytes(bytes)
+            val token = bytes.joinToString("") { "%02x".format(it) }
+            synchronized(apkGrantLock) {
+                activeApkToken = token
+                activeApkFile = apkFile
+            }
+            return Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/patched_apk/$token")
+        }
+
+        private fun resolvePatchedApk(token: String): java.io.File? = synchronized(apkGrantLock) {
+            if (token.isNotEmpty() && token == activeApkToken) activeApkFile else null
+        }
 
         fun xferUri(token: String): Uri =
             Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/native_xfer/$token")

@@ -25,13 +25,18 @@ import java.util.Locale
 object LogStore {
     private const val FILE = "doubao_a11y_log.txt"
     private const val OLD = "doubao_a11y_log.1.txt"
+    private const val CRASH_FILE = "doubao_a11y_crash.txt"
+    private const val PREF_LAST_EXIT_TS = "lastRecordedExitTs"
     private const val MAX_BYTES = 512 * 1024L       // 两个文件加起来约 1MB
+    private const val MAX_CRASH_BYTES = 128 * 1024L
     private const val COPY_CHARS = 3000             // QQ 一条消息放得下
     private const val AUTO_OFF_MS = 60 * 60 * 1000L
     const val PREF_SINCE = "runLogSince"
 
     @Volatile
     private var ctx: Context? = null
+    @Volatile
+    private var crashHooked = false
     private var handler: Handler? = null
     private val time = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
 
@@ -41,6 +46,100 @@ object LogStore {
         try {
             val t = HandlerThread("DoubaoA11yLog").apply { start() }
             handler = Handler(t.looper)
+        } catch (_: Throwable) {
+        }
+        installCrashMonitor(ctx!!)
+    }
+
+    /**
+     * 透明捕获豆包进程闪退与系统级异常退出（含 Native 崩溃 / OOM / ANR）：
+     * - 链式保存原有 UncaughtExceptionHandler，绝不吞掉异常；
+     * - Android 11+ 通过 ApplicationExitInfo 拉取上次进程的退出原因与内存占用，
+     *   即使未开启“记录运行日志”，也能通过“复制日志 / 保存日志”导出用于排查老机型闪退。
+     */
+    private fun installCrashMonitor(app: Context) {
+        if (crashHooked) return
+        crashHooked = true
+        try {
+            val prev = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                try {
+                    val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+                    val sb = StringBuilder()
+                    sb.append("\n[Java闪退 ").append(ts).append("] 线程=").append(thread.name)
+                        .append(" 机型=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                        .append(" Android=").append(Build.VERSION.RELEASE).append("(API ").append(Build.VERSION.SDK_INT).append(")")
+                        .append(" 模块=").append(ConfigSpec.MODULE_VERSION_NAME).append('\n')
+                    sb.append(android.util.Log.getStackTraceString(throwable)).append('\n')
+                    appendCrashSync(app, sb.toString())
+                } catch (_: Throwable) {
+                }
+                prev?.uncaughtException(thread, throwable)
+            }
+        } catch (_: Throwable) {
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            handler?.postDelayed({ recordHistoricalExits(app) }, 1500L)
+        }
+    }
+
+    private fun appendCrashSync(app: Context, text: String) {
+        try {
+            val f = File(app.filesDir, CRASH_FILE)
+            if (f.exists() && f.length() > MAX_CRASH_BYTES) {
+                val keep = runCatching { f.readText() }.getOrDefault("")
+                f.writeText(keep.takeLast((MAX_CRASH_BYTES / 2).toInt()))
+            }
+            f.appendText(text)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun recordHistoricalExits(app: Context) {
+        if (Build.VERSION.SDK_INT < 30) return
+        try {
+            val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
+            val reasons = am.getHistoricalProcessExitReasons(app.packageName, 0, 5)
+            if (reasons.isEmpty()) return
+            val p = app.getSharedPreferences(ConfigSpec.PREFS_NAME, Context.MODE_PRIVATE)
+            val lastTs = p.getLong(PREF_LAST_EXIT_TS, 0L)
+            var newestTs = lastTs
+            val sb = StringBuilder()
+            for (info in reasons.asReversed()) {
+                val ts = info.timestamp
+                if (ts <= lastTs) continue
+                if (ts > newestTs) newestTs = ts
+                val reason = info.reason
+                val abnormal = reason == android.app.ApplicationExitInfo.REASON_CRASH ||
+                    reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE ||
+                    reason == android.app.ApplicationExitInfo.REASON_ANR ||
+                    reason == android.app.ApplicationExitInfo.REASON_LOW_MEMORY ||
+                    reason == android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE
+                if (!abnormal) continue
+                val reasonName = when (reason) {
+                    android.app.ApplicationExitInfo.REASON_CRASH -> "Java崩溃(CRASH)"
+                    android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "Native闪退(CRASH_NATIVE)"
+                    android.app.ApplicationExitInfo.REASON_ANR -> "无响应(ANR)"
+                    android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "内存不足(LOW_MEMORY)"
+                    android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "资源占用过高"
+                    else -> "原因码=$reason"
+                }
+                val whenStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(ts))
+                sb.append("[系统异常退出 ").append(whenStr).append("] 进程=").append(info.processName)
+                    .append(" 原因=").append(reasonName)
+                    .append(" status=").append(info.status)
+                    .append(" PSS=").append(info.pss / 1024).append("MB")
+                    .append(" RSS=").append(info.rss / 1024).append("MB")
+                    .append(" 描述=").append(info.description ?: "无")
+                    .append('\n')
+            }
+            if (newestTs > lastTs) {
+                p.edit().putLong(PREF_LAST_EXIT_TS, newestTs).apply()
+            }
+            if (sb.isNotEmpty()) {
+                appendCrashSync(app, sb.toString())
+                add('E', "检测到豆包上次异常退出：\n$sb")
+            }
         } catch (_: Throwable) {
         }
     }
@@ -123,6 +222,14 @@ object LogStore {
     private fun readAll(): String {
         val d = dir() ?: return ""
         val sb = StringBuilder()
+        val crash = File(d, CRASH_FILE)
+        if (crash.exists()) try {
+            val ct = crash.readText()
+            if (ct.isNotBlank()) {
+                sb.append("==== 近期闪退/异常退出记录 ====\n").append(ct.trim()).append("\n==== 闪退记录结束 ====\n")
+            }
+        } catch (_: Throwable) {
+        }
         for (n in listOf(OLD, FILE)) {
             val f = File(d, n)
             if (f.exists()) try {
@@ -216,6 +323,7 @@ object LogStore {
         val r = Runnable {
             File(d, FILE).delete()
             File(d, OLD).delete()
+            File(d, CRASH_FILE).delete()
         }
         if (h != null) h.post(r) else r.run()
         return "日志已清空"

@@ -465,6 +465,7 @@ object ToolbarInject {
         val tooltipCls = Hooker.findClassQuiet("com.bytedance.common_biz.ui.tooltip.ImeTooltipView", cl) ?: return
         val submitResCls = Hooker.findClassQuiet("com.bytedance.common_biz.ui.tooltip.ImeTooltipSubmitResult", cl) ?: return
         val styleCls = Hooker.findClassQuiet("com.bytedance.common_biz.ui.tooltip.ImeTooltipStyle", cl)
+        val sourceCls = Hooker.findClassQuiet("com.bytedance.android.input.keyboard.tooltip.ImeTooltipSource", cl)
         val prefix = tooltipCls.name + "$"
         val methods = tooltipCls.declaredMethods.filter { m ->
             !Modifier.isStatic(m.modifiers) &&
@@ -482,14 +483,43 @@ object ToolbarInject {
             if (!A11yState.recording) return@SafeHook
             val resName = (p.result as? Enum<*>)?.name
             if (resName != "ACCEPTED" && resName != "REPLACED") return@SafeHook
-            val text = extractTooltipText(p.args.getOrNull(0), styleCls)
+            val req = p.args.getOrNull(0)
+            val srcName = extractTooltipSource(req, sourceCls)
+            val fromVoice = isVoiceTooltipSource(srcName)
+            val text = extractTooltipText(req, styleCls)
                 .ifBlank { collectViewText(p.thisObject as? View) }
                 .trim()
             if (text.isNotEmpty()) {
-                L.i("工具栏提示：「$text」（结果=$resName）")
-                KeyboardOps.onToolbarTip(text)
+                L.i("工具栏提示：「$text」（结果=$resName，来源=${srcName.ifEmpty { "未知" }}）")
+                KeyboardOps.onToolbarTip(text, fromVoice = fromVoice)
             }
         }))
+    }
+
+    private fun extractTooltipSource(req: Any?, sourceCls: Class<*>?): String {
+        if (req == null) return ""
+        return try {
+            for (f in req.javaClass.declaredFields) {
+                if (Modifier.isStatic(f.modifiers)) continue
+                f.isAccessible = true
+                val v = f.get(req) ?: continue
+                if (sourceCls != null && sourceCls.isInstance(v)) {
+                    return (v as? Enum<*>)?.name ?: v.toString()
+                }
+                if (v is Enum<*> && v.javaClass.simpleName.contains("TooltipSource", ignoreCase = true)) {
+                    return v.name
+                }
+            }
+            ""
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun isVoiceTooltipSource(sourceName: String): Boolean {
+        if (sourceName.isEmpty()) return false
+        val upper = sourceName.uppercase()
+        return upper.contains("VOICE") || upper.contains("ASR") || upper.contains("SPEECH")
     }
 
     private fun extractTooltipText(req: Any?, styleCls: Class<*>?): String {

@@ -55,4 +55,11 @@ object CharWords {
         val w = wordOf(t[0]) ?: return t
         return "${w}的$t"
     }
+
+    /** 单个汉字带字头解释：“好” → “好，好坏的好”；无解释或未开单字解释时返回 null */
+    fun explainWithChar(c: Char): String? {
+        if (!isCjk(c) || !Config.b("charExplain")) return null
+        val w = wordOf(c) ?: return null
+        return "$c，${w}的$c"
+    }
 }

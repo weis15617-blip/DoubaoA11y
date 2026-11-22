@@ -96,7 +96,8 @@ object LocalKeystore {
             add(Calendar.DAY_OF_YEAR, -1) // 避免手机时钟略有偏差导致证书尚未生效
         }
         val notBefore = cal.time
-        cal.add(Calendar.YEAR, 30)
+        // 有效期 20 年（落在 UTCTime 范围 <=2049 年），兼顾旧版安卓 X.509 校验器
+        cal.add(Calendar.YEAR, 20)
         val notAfter = cal.time
 
         val serial = BigInteger(63, SecureRandom()).abs().max(BigInteger.ONE)

@@ -15,7 +15,11 @@ object Panels {
     private val names = setOf(
         "ToolboxKeyboardView",
         "ClipboardCommonPhraseContainer",
+        "ClipboardHistoryView",
         "ClipboardHistoryListView",
+        "ClipboardHistoryClearView",
+        "ClipboardHistorySettingsView",
+        "ClipboardHistoryEmptyView",
         "CommonPhraseListView",
     )
     private val main = Handler(Looper.getMainLooper())

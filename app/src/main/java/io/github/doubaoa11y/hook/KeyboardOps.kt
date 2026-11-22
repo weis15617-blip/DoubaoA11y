@@ -458,26 +458,38 @@ object KeyboardOps {
         return true
     }
 
-    /** 收到工具栏提示条（ImeTooltipView / showToast）文案：在智能整理监听窗口内立刻朗读 */
-    fun onToolbarTip(raw: String) {
+    /**
+     * 收到工具栏提示条（ImeTooltipView / showToast）文案：
+     * - 语音输入期间（或刚结束语音的保护期、语音来源提示）绝不抓取朗读，避免干扰语音输入；
+     * - 其他工具栏功能提示（如翻译、智能整理、剪贴板等）即时朗读，并做短时防重。
+     */
+    fun onToolbarTip(raw: String, fromVoice: Boolean = false) {
         val text = raw.trim()
         if (text.isEmpty()) return
+        if (!A11yState.recording) return
+        if (fromVoice || Voice.isVoiceBusy() || isVoiceActive() || VirtualKeys.voiceHeld()) {
+            L.i("语音输入期间忽略工具栏提示：「$text」")
+            return
+        }
         val now = SystemClock.uptimeMillis()
-        if (now > organizeWatchUntil) return
         if (text == lastOrganizeTip && now - lastOrganizeTipAt < 800L) return
         lastOrganizeTip = text
         lastOrganizeTipAt = now
-        organizeStartHintRunner?.let { main.removeCallbacks(it) }
-        organizeStartHintRunner = null
-        organizeDoneRunner?.let { main.removeCallbacks(it) }
-        organizeDoneRunner = null
-        val inProgress = text.contains("正在") || text.contains("整理中")
-        if (!inProgress) {
-            organizePollRunner?.let { main.removeCallbacks(it) }
-            organizePollRunner = null
-            organizeWatchUntil = 0L
+        if (now <= organizeWatchUntil) {
+            organizeStartHintRunner?.let { main.removeCallbacks(it) }
+            organizeStartHintRunner = null
+            organizeDoneRunner?.let { main.removeCallbacks(it) }
+            organizeDoneRunner = null
+            val inProgress = text.contains("正在") || text.contains("整理中")
+            if (!inProgress) {
+                organizePollRunner?.let { main.removeCallbacks(it) }
+                organizePollRunner = null
+                organizeWatchUntil = 0L
+            }
+            L.i("智能整理工具栏提示：「$text」")
+        } else {
+            L.i("工具栏功能提示：「$text」")
         }
-        L.i("智能整理工具栏提示：「$text」")
         Speaker.echo(text)
     }
 

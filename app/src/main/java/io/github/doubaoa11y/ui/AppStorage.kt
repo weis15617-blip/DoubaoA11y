@@ -24,6 +24,7 @@ object AppStorage {
     const val DIR_WORDS = "解释词库"
     const val DIR_SOUNDS = "音效"
     const val DIR_LOGS = "日志"
+    const val DIR_APKS = "安装包"
 
     private const val REQ_LEGACY_STORAGE = 1901
     private const val REQ_ALL_FILES = 1902
@@ -36,6 +37,7 @@ object AppStorage {
     fun wordsDir(): File = File(rootDir(), DIR_WORDS)
     fun soundsDir(): File = File(rootDir(), DIR_SOUNDS)
     fun logsDir(): File = File(rootDir(), DIR_LOGS)
+    fun apksDir(): File = File(rootDir(), DIR_APKS)
 
     fun displayDir(subDirName: String): String = "内部存储/$ROOT_NAME/$subDirName"
     fun displayPath(file: File): String {

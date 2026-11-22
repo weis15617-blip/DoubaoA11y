@@ -33,6 +33,7 @@ object ServiceHooks {
                 if (pulled) ToolbarInject.refreshToolbar()
                 EditOptions.reset()
                 EditActions.onWindowHidden()
+                ClipboardNav.onKeyboardShown()
                 val identity = "${ei?.packageName}/${ei?.fieldId}/${ei?.inputType}"
                 if (editorIdentity != identity || p.args[1] != true) {
                     Voice.onInputEnd()
@@ -67,6 +68,7 @@ object ServiceHooks {
                 L.hookError("queryBoardType", t)
             }
             KeyboardState.onShown()
+            ClipboardNav.onKeyboardShown()
             TatansBridge.onShown()
             FullscreenMode.onWindowShown()
             ModuleEntries.toolbar()
@@ -85,6 +87,7 @@ object ServiceHooks {
             ReaderControl.hidden()
             EditOptions.onKeyboardHidden()
             EditActions.onWindowHidden()
+            ClipboardNav.onKeyboardHidden()
             Speaker.stop()
             KeyboardOps.resetVoice()
             Voice.onInputEnd()
@@ -110,6 +113,7 @@ object ServiceHooks {
         ReaderControl.hidden()
         EditOptions.onKeyboardHidden()
         EditActions.onWindowHidden()
+        ClipboardNav.onKeyboardHidden()
         Speaker.stop()
         KeyboardOps.resetVoice()
         KeyboardState.onHidden()
@@ -171,6 +175,7 @@ object ServiceHooks {
         ReaderControl.init(ctx)
         Sound.init(ctx)
         A11yState.init(ctx)
+        ClipboardNav.init(ctx)
         TatansBridge.init(ctx)
         A11yState.onChange { FullscreenMode.refresh("读屏状态变化") }
         val screen = object : BroadcastReceiver() {

@@ -406,6 +406,8 @@ object FullscreenMode {
      */
     fun onComputeInsets(insets: Any) {
         if (!active || !wanted || winH <= 0 || kbTop <= 0) return
+        // 剪贴板/菜单/定制工具栏等读屏面板打开时，不覆盖整屏触摸区域，交还给豆包与系统读屏焦点导航
+        if (layerHidden || TatansBridge.panelOpen()) return
         val value = insets as? android.inputmethodservice.InputMethodService.Insets
         if (value == null) {
             detach("触摸区域类型不匹配"); fail("无法设置全屏触摸区域"); return
@@ -580,6 +582,10 @@ object FullscreenMode {
             l.importantForAccessibility =
                 if (hide) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                 else View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            // 面板开合时必须重新计算输入法窗口触摸区域：打开面板时交还上半屏给系统与读屏导航，
+            // 关闭面板后再恢复全屏手势区触摸范围。
+            requestInsets(decor)
+            main.post { if (active) requestInsets(decor) }
             L.i("上半屏手势区${if (hide) "已隐藏（面板打开）" else "已恢复"}")
         } catch (t: Throwable) {
             L.hookError("FullscreenMode.syncPanelVisibility", t)

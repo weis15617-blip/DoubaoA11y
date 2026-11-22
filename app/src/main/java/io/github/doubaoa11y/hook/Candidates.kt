@@ -56,12 +56,15 @@ object Candidates {
         origin.input(CandidateOriginState.Input.HANDWRITING)
     }
     fun onCursorMove() { origin.cursorMoved(); clearView("光标移动") }
-    fun onDelete() { reset("删除候选") }
+    fun onDelete() { clearSession("删除候选") }
+    private fun isEnglishBoard(): Boolean = JniHooks.isEnglish || KeyboardState.boardName == "英文键盘"
     fun onExternalSelection(hasComposingRegion: Boolean) {
-        if (hasComposingRegion || engineTyping() == true) return
         // 刚抬手输入按键时，合成的 ACTION_UP（40ms 后）和引擎快照还在路上；
         // 此时到达的异步 onUpdateSelection 多半来自上一笔删除/上屏，不能误判为移光标而挡掉新按键的候选。
-        if (android.os.SystemClock.uptimeMillis() - lastTypingAt < 200L) return
+        if (android.os.SystemClock.uptimeMillis() - lastTypingAt < 250L) return
+        // 英文键盘下把光标移到已有单词中间时，豆包会自动给该单词加上 composingRegion 并返回 engineTyping=true，
+        // 若直接放行会把单词联想误当成打字候选；只要最近没真实按过键，仍按移光标清理候选态。
+        if (!isEnglishBoard() && (hasComposingRegion || engineTyping() == true)) return
         onCursorMove()
     }
     private var queryFailureLogged = false
@@ -75,7 +78,7 @@ object Candidates {
     fun onPinyinCleared() {
         // 手写本来没有拼音串，空拼音通知不能当成取消手写候选。
         if (pinyin.isBlank() && origin.fromHandwriting()) return
-        if (engineTyping() == false) reset("拼音栏已空")
+        if (engineTyping() == false) clearSession("拼音栏已空")
     }
 
     private val navOn: Boolean get() = VirtualKeys.enabled && Config.b("candidateNav") && composing
@@ -209,8 +212,14 @@ object Candidates {
     fun install() {
         InputHooks.onCommit { _, _ -> origin.committed(); clearView("上屏") }
         InputHooks.onComposing { text ->
-            if (text.isBlank()) reset("拼音删空")
-            else if (!Voice.isRecording()) origin.input(CandidateOriginState.Input.COMPOSING)
+            if (text.isBlank()) clearSession("拼音删空")
+            else if (!Voice.isRecording() && !origin.isMoved()) {
+                // 英文键盘若近期未发生真实按键输入（光标落入已有单词触发的重新组字/联想），不误开启候选态
+                val recentlyTyped = android.os.SystemClock.uptimeMillis() - lastTypingAt < 1500L
+                if (!isEnglishBoard() || recentlyTyped) {
+                    origin.input(CandidateOriginState.Input.COMPOSING)
+                }
+            }
         }
         InputHooks.onFinishComposing { origin.committed(); clearView("结束组字") }
         InputHooks.onDelete { onDelete() }
@@ -223,11 +232,14 @@ object Candidates {
         try {
             val typing = de.robv.android.xposed.XposedHelpers.callMethod(j, "isTypingInput") as? Boolean ?: return
             L.i("工具栏恢复闲置：引擎组字=$typing")
-            if (!typing && !origin.fromHandwriting()) reset("工具栏恢复，拼音已清空")
+            if (!typing && !origin.fromHandwriting()) clearSession("工具栏恢复，拼音已清空")
         } catch (t: Throwable) {
             L.hookError("Candidates.toolbarIdle", t)
         }
     }
+
+    /** 清理候选会话但保留“刚移过光标”标记（用于删空/重框旧组字等非键盘输入回调） */
+    private fun clearSession(why: String) { origin.clearSession(); clearView(why) }
 
     fun reset(why: String) { origin.clear(); clearView(why) }
 
@@ -261,6 +273,13 @@ object Candidates {
         // 删空时可能收到空数组或 null；也可能仅剩“手写找字”等非候选入口。
         // 必须同时撤掉翻页等待和延迟朗读，避免旧候选继续影响空格、标点。
         val typingNow = engineTyping()
+        if (isEnglishBoard() && origin.isMoved()) {
+            if (py.isNotBlank() || list.any { it.isNotBlank() }) {
+                L.i("英文键盘光标移动后的联想候选，忽略（py=$py，首项=${list.firstOrNull().orEmpty()}）")
+            }
+            clearView("英文键盘移光标联想")
+            return
+        }
         if (!origin.snapshot(py.isNotBlank(), list.any { it.isNotBlank() }, typingNow)) {
             if (py.isNotBlank() || list.any { it.isNotBlank() }) {
                 L.i("忽略非当前输入会话候选（py=$py，首项=${list.firstOrNull().orEmpty()}，引擎组字=$typingNow）")

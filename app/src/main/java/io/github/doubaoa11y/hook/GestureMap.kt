@@ -67,6 +67,9 @@ object GestureMap {
         if (action == ConfigSpec.ACT_PREV_OPTION) return EditOptions.prev()
         if (action == ConfigSpec.ACT_NEXT_OPTION) return EditOptions.next()
         if (action == ConfigSpec.ACT_RUN_OPTION) return EditOptions.run()
+        // 切换剪贴板历史（带序号全文朗读；紧接着单指双击可直接粘贴到编辑框）
+        if (action == ConfigSpec.ACT_PREV_CLIPBOARD) return ClipboardNav.prev()
+        if (action == ConfigSpec.ACT_NEXT_CLIPBOARD) return ClipboardNav.next()
         // “默认”项：双击跳行首/行尾（在行尾就跳行首，否则跳行尾）
         if (action == ConfigSpec.ACT_DEFAULT) return EditActions.toggleEnd()
         // “暂时关闭全屏模式”：不收起键盘，切回半屏，下次展开自动恢复全屏
@@ -140,6 +143,7 @@ object GestureMap {
         ConfigSpec.ACT_SWITCH_SCREEN -> "切换不了输入方式"
         ConfigSpec.ACT_HIDE -> "键盘收不起来"
         ConfigSpec.ACT_SMART_ORGANIZE -> "当前豆包版本无法直接执行智能整理"
+        ConfigSpec.ACT_PREV_CLIPBOARD, ConfigSpec.ACT_NEXT_CLIPBOARD -> "剪贴板为空"
         ConfigSpec.ACT_PREV_OPTION, ConfigSpec.ACT_NEXT_OPTION, ConfigSpec.ACT_RUN_OPTION -> "编辑选项没做成"
 
         else -> "这个动作没做成"

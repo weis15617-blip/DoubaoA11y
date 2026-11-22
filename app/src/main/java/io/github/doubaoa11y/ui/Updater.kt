@@ -608,8 +608,12 @@ object Updater {
                                 @Suppress("DEPRECATION")
                                 val confirm = i.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                                 if (confirm != null) {
-                                    confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    c.startActivity(confirm)
+                                    try {
+                                        act.startActivity(confirm)
+                                    } catch (_: Throwable) {
+                                        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        c.startActivity(confirm)
+                                    }
                                 }
                             }
                             PackageInstaller.STATUS_SUCCESS -> say(act, status, "更新已安装")
@@ -621,7 +625,7 @@ object Updater {
                         }
                     }
                 }
-                if (Build.VERSION.SDK_INT >= 33) act.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                if (Build.VERSION.SDK_INT >= 33) act.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
                 else act.registerReceiver(receiver, filter)
                 val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
                 val pending = PendingIntent.getBroadcast(act, id, Intent(ACTION_INSTALLED).setPackage(act.packageName), flags)

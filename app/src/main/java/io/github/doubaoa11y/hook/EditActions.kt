@@ -443,11 +443,9 @@ object EditActions {
         // 光标一动，应用自己会发“选区变了”，读屏立刻把那个字念出来；
         // 走语音库播报时先把读屏压一下，免得同一个字念两遍
         Speaker.hushReader()
-        // 该念哪个字：见 charAtCaret（修“反向移动重复念同一个字”）
-        val seg = charAtCaret(s.text, target, dir)
-        // 走到开头（target == 0）时，光标前已经没有字符，解说等读屏按 codePointBefore(toIndex) 取字会返回空而静默；
-        // 走到结尾（target == length）时 codePointBefore(length) 仍是最后一个字，读屏会自己念，无需强行补读抢麦。
-        speakSegment(seg, force = target <= 0)
+        // 始终朗读光标前面的字符，汉字带单字解释（如“好，好坏的好”）；光标移到全文最开头时前面无字，报“已到开头”
+        val seg = charBeforeCaret(s.text, target)
+        speakCharMove(seg, atStart = target <= 0)
     }
 
     /** 上一次朗读过的字在文本里的位置（-1 = 还没念过） */
@@ -467,29 +465,29 @@ object EditActions {
     }
 
     /**
-     * 移动一格之后该念哪个字。
-     *
-     * 用户反复提的那个毛病：四个字“吃饭了吗？”，光标移到“吃”上（这时念的是“吃”），
-     * 再往右移，老代码念的还是“跨过的那个字”——又是“吃”，听起来像光标没动。
-     *
-     * 现在的规则（正向反向都不重复）：
-     * - 向左移：念光标前面那个字（移动后的 text[target]），所以 1→0 念“吃”；
-     * - 向右移：念跨过的字 text[target-1]；如果这个字刚刚才念过，说明用户在往回走，
-     *   改念光标后面那个字 text[target]，所以 0→1 念“饭”而不是再念一遍“吃”；
-     * - 光标已经在最后一个字后面：念最后一个字。
+     * 移动光标到 target 之后，取光标**前面**的一个完整字符并附带单字解释：
+     * - 光标在全文最开头（target <= 0）：前面没有字符，读“已到开头”；
+     * - 单个汉字且开启单字解释：读“好，好坏的好”；
+     * - 标点/空白/换行/字母/数字/emoji：读符号名称或原字符。
      */
-    private fun charAtCaret(text: String, target: Int, dir: Int): String {
+    private fun charBeforeCaret(text: String, target: Int): String {
         val len = text.length
-        if (len == 0) return ""
-        val crossed = if (dir > 0) target - 1 else target
-        val idx = when {
-            dir < 0 -> target.coerceIn(0, len - 1)
-            crossed in 0 until len && crossed != lastCharIdx -> crossed
-            target in 0 until len -> target
-            else -> len - 1
+        if (len == 0) return "编辑框为空"
+        val p = target.coerceIn(0, len)
+        if (p <= 0) {
+            lastCharIdx = -1
+            return "已到开头"
         }
-        lastCharIdx = idx
-        return spoken(text[idx])
+        val bi = BreakIterator.getCharacterInstance(Locale.getDefault())
+        bi.setText(text)
+        val prev = bi.preceding(p).let { if (it == BreakIterator.DONE || it < 0) (p - 1).coerceAtLeast(0) else it }
+        lastCharIdx = prev
+        val unit = text.substring(prev, p)
+        if (unit.length == 1) {
+            val ch = unit[0]
+            return CharWords.explainWithChar(ch) ?: spoken(ch)
+        }
+        return Names.spoken(unit)
     }
 
     /** 还没读出去的那一个字；快速连滑时被后来的覆盖，只留最后停留的那个 */
@@ -502,29 +500,43 @@ object EditActions {
     }
 
     /**
-     * 读一段越过的字：单个标点/空白/换行读名字，多个字符读原文（超长截断）。
+     * 移动光标后的单字朗读：
+     * - 独立 TTS / 天坦全屏屏蔽：90ms 防抖合并，快速连滑只念最后停留的字符，无双读；
+     * - 解说/保益/点明读屏播报：对齐到 onUpdateSelection 后覆盖读屏自带的单字播报，
+     *   确保准确朗读光标前的字符及单字解释（连续滑动会自动取消前一条挂起播报）。
+     */
+    private fun speakCharMove(text: String, atStart: Boolean) {
+        if (!Config.b("fsSpeakChar") || text.isEmpty()) return
+        if (!Speaker.readerWillSpeak()) {
+            if (atStart) {
+                main.removeCallbacks(echoRunner)
+                pendingEcho = ""
+                Speaker.speak(text)
+                return
+            }
+            pendingEcho = text
+            main.removeCallbacks(echoRunner)
+            main.postDelayed(echoRunner, 90)
+            return
+        }
+        main.removeCallbacks(echoRunner)
+        pendingEcho = ""
+        val d = cancelSelectionDelayMs()
+        scheduleAfterSelection(text, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+    }
+
+    /**
+     * 读一段越过的字：单个标点/空白/换行读名字，多个字符全文朗读（不截断）。
      * 关掉“移动光标时朗读字词”后不读，交给读屏决定。
-     *
-     * fast：手的滑动比朗读快得多，逐字排队会越落越远（用户反馈“滑两下才念到上一个字”）。
-     * 所以这里做 90ms 合并——连续移动只读最后停下的那一格，中间的让位。
      */
     private fun speakSegment(seg: String, force: Boolean = false) {
         if (!Config.b("fsSpeakChar")) return
-        // 方案 A：走屏幕阅读器播报且读屏未屏蔽 8192（解说/保益/点明）时，单字移动交给读屏直接念，
-        // 零延迟、不打架；连滑 3 格以上用 noteBurst 补念最后一格；贴边格 (force) 仍由模块补读。
         if (!force && Speaker.readerWillSpeak()) {
             noteBurst(seg)
             return
         }
         val t = seg.trim()
-        val text = if (t.isEmpty()) {
-            // 纯空白/换行，读成“空格”/“换行”
-            spoken(seg.firstOrNull())
-        } else if (t.length <= 24) {
-            t
-        } else {
-            t.substring(0, 24) + "，后面还有${t.length - 24}个字"
-        }
+        val text = if (t.isEmpty()) spoken(seg.firstOrNull()) else t
         if (force) {
             main.removeCallbacks(echoRunner)
             pendingEcho = ""
@@ -563,9 +575,7 @@ object EditActions {
     }
 
     /**
-     * 光标已经到了开头/结尾还继续滑：把**字数 + 整段文字完整念一遍**。
-     *
-     * 开头和结尾统一格式：“共N个字 + 全文”，数字和正文之间不留逗号，不然读屏会在那里停一下。
+     * 光标已经到了开头/结尾还继续滑：先完整念一遍正文，再报“共N个字”。
      * 换行读成停顿（`\n` → 逗号），`\r\n` 直接去掉，别让读屏念成“斜杠 n”或者直接吃掉。
      */
     private fun speakBoundary(dir: Int, s: Snapshot) {
@@ -578,9 +588,9 @@ object EditActions {
         }
         val whole = text.replace("\r\n", "").replace('\n', '，').trim()
         Speaker.unmute()
-        val msg = if (whole.isEmpty()) "共${n}个字" else "共${n}个字$whole"
+        val msg = if (whole.isEmpty()) "共${n}个字" else "${whole}，共${n}个字"
         Speaker.echo(msg)
-        L.i("光标到边界：${if (dir < 0) "开头" else "结尾"}（字数+全文），共 $n 个字")
+        L.i("光标到边界：${if (dir < 0) "开头" else "结尾"}（全文+字数），共 $n 个字")
     }
 
     /** 光标所在的那一句 / 那一段（按用户配置的标点断句） */
@@ -628,15 +638,30 @@ object EditActions {
         ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, code, 0, meta))
     }
 
-    /** 双击“默认”项：跳到行尾；已经在行尾就跳行首。播报“已到开头”/“已到结尾” */
+    /** 双击“默认”项：跳到全文末尾；已经在末尾就跳到开头。选择模式下保持锚点扩选到开头/末尾。 */
     fun toggleEnd(): Boolean {
         Candidates.onCursorMove()
         val ic = ic() ?: return false
         val s = snapshot(ic) ?: run {
+            if (selecting) {
+                val t = SystemClock.uptimeMillis()
+                val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MOVE_END, 0, meta))
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MOVE_END, 0, meta))
+                return true
+            }
             // 拿不到文本快照就发 MOVE_END（跳到结尾），至少光标能动
             send(KeyEvent.KEYCODE_MOVE_END)
             speechGate.markSkipNext(SystemClock.uptimeMillis())
             scheduleAfterSelection("已到结尾")
+            return true
+        }
+        if (selecting && stillSelecting(s)) {
+            val base = s.offset
+            val len = s.text.length
+            val active = if (activeEnd in base..(base + len)) activeEnd else base + s.indexOf(s.caret)
+            val atEnd = active >= base + len
+            extendToDocBoundary(ic, s, toStart = atEnd)
             return true
         }
         val caret = s.indexOf(s.caret)
@@ -968,12 +993,8 @@ object EditActions {
         return trimmed.replace('\n', '，')
     }
 
-    /** 格式化选区增量片段：单字符/标点转符号中文名，超长截断 */
-    private fun formatDeltaText(raw: String): String {
-        val label = plainLabel(raw)
-        if (label.length <= 24) return label
-        return label.substring(0, 24) + "等${raw.length}个字"
-    }
+    /** 格式化选区增量片段：单字符/标点转符号中文名，全文朗读不截断 */
+    private fun formatDeltaText(raw: String): String = plainLabel(raw)
 
     /** 方向键带 Shift 扩选：按粒度选对应的键 */
     private fun shiftFallback(unit: Unit, dir: Int) {
@@ -982,12 +1003,21 @@ object EditActions {
             Unit.PARAGRAPH -> if (dir < 0) KeyEvent.KEYCODE_DPAD_UP else KeyEvent.KEYCODE_DPAD_DOWN
             Unit.LINE -> if (dir < 0) KeyEvent.KEYCODE_DPAD_UP else KeyEvent.KEYCODE_DPAD_DOWN
             Unit.CHAR -> if (dir < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
+            Unit.DOC -> {
+                val ic = ic() ?: return
+                val key = if (dir < 0) KeyEvent.KEYCODE_MOVE_HOME else KeyEvent.KEYCODE_MOVE_END
+                val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+                val t = SystemClock.uptimeMillis()
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, key, 0, meta))
+                ic.sendKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, key, 0, meta))
+                return
+            }
         }
         arrowShift(code)
     }
 
     /** 扩选用的移动单位 */
-    private enum class Unit { CHAR, SENTENCE, PARAGRAPH, LINE }
+    private enum class Unit { CHAR, SENTENCE, PARAGRAPH, LINE, DOC }
 
     /**
      * 在文本里按单位找下一个边界：成功返回新位置（相对文本开头），到头返回 -1。
@@ -1070,7 +1100,7 @@ object EditActions {
                     }
                 }
             }
-            Unit.LINE -> return -1
+            Unit.LINE, Unit.DOC -> return -1
         }
     }
 
@@ -1152,7 +1182,7 @@ object EditActions {
             Speaker.echo("空行")
             return
         }
-        Speaker.echo(if (line.length <= 200) line else line.take(200) + "，后面还有${line.length - 200}个字")
+        Speaker.echo(line)
     }
 
     fun lineStart() = jumpTo(true)
@@ -1160,7 +1190,47 @@ object EditActions {
 
     private fun jumpTo(start: Boolean) {
         Candidates.onCursorMove()
+        val ic = ic()
+        val s = ic?.let { snapshot(it) }
         val code = if (start) KeyEvent.KEYCODE_MOVE_HOME else KeyEvent.KEYCODE_MOVE_END
+        if (selecting && ic != null) {
+            if (s == null) {
+                arrowShift(code)
+                return
+            }
+            if (stillSelecting(s)) {
+                cancelPendingExtend()
+                cancelPendingSpeech()
+                speechGate.reset()
+                val base = s.offset
+                val len = s.text.length
+                val a = if (anchor in base..(base + len)) anchor else base + s.indexOf(minOf(s.start, s.end))
+                var active = if (activeEnd in base..(base + len)) activeEnd else a
+                if (s.hasSelection) {
+                    val realLo = base + s.indexOf(minOf(s.start, s.end))
+                    val realHi = base + s.indexOf(maxOf(s.start, s.end))
+                    if (minOf(a, active) != realLo || maxOf(a, active) != realHi) {
+                        active = s.end.coerceIn(base, base + len)
+                    }
+                }
+                val prevLo = minOf(a, active)
+                val prevHi = maxOf(a, active)
+                selectGuardUntil = SystemClock.uptimeMillis() + 260L
+                arrowShift(code)
+                watchExtendResult(
+                    if (start) "选到行首" else "选到行尾",
+                    Unit.LINE,
+                    if (start) -1 else 1,
+                    s.text,
+                    base,
+                    prevLo,
+                    prevHi,
+                    allowFallback = false,
+                    timeoutMs = 110L,
+                )
+                return
+            }
+        }
         send(code)
         speechGate.markSkipNext(SystemClock.uptimeMillis())
         scheduleAfterSelection(if (start) "行首" else "行尾")
@@ -1199,11 +1269,10 @@ object EditActions {
         Speaker.hushReader()
         val sentence = segmentAt(t, p, para = false)
         // 空句（连续标点、只有换行）不念“上一句/下一句”这种方向名——用户明确说这类提示是多余的，
-        // 只会和真正要听的内容抢话。有内容就念内容
+        // 只会和真正要听的内容抢话。有内容就念完整内容
         if (sentence.isNotEmpty()) {
-            val msg = if (sentence.length <= 200) sentence else sentence.take(200) + "，后面还有${sentence.length - 200}个字"
             val d = if (kotlin.math.abs(p - caret) <= 1) cancelSelectionDelayMs() else selectionDelayMs()
-            scheduleAfterSelection(msg, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+            scheduleAfterSelection(sentence, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
         }
     }
 
@@ -1233,33 +1302,96 @@ object EditActions {
         val para = segmentAt(s.text, p, para = true)
         // 空的（连着的空行）不念“上一段/下一段”，见同一版的说明
         if (para.isNotEmpty()) {
-            val msg = if (para.length <= 200) para else para.take(200) + "，后面还有${para.length - 200}个字"
             val d = if (kotlin.math.abs(p - caret) <= 1) cancelSelectionDelayMs() else selectionDelayMs()
-            scheduleAfterSelection(msg, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+            scheduleAfterSelection(para, isEcho = true, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
         }
     }
 
     // ---------------- 整篇的开头、结尾 ----------------
 
-    fun docStart() {
+    fun docStart() = jumpDoc(toStart = true)
+
+    fun docEnd() = jumpDoc(toStart = false)
+
+    private fun jumpDoc(toStart: Boolean) {
         Candidates.onCursorMove()
         val ic = ic() ?: return
         val s = snapshot(ic) ?: return
-        ic.setSelection(s.offset, s.offset)
+        if (selecting && stillSelecting(s)) {
+            extendToDocBoundary(ic, s, toStart)
+            return
+        }
+        val target = if (toStart) s.offset else s.offset + s.text.length
+        ic.setSelection(target, target)
         speechGate.markSkipNext(SystemClock.uptimeMillis())
-        scheduleAfterSelection("已到开头")
+        scheduleAfterSelection(if (toStart) "已到开头" else "已到结尾")
         main.postDelayed({ readLine(quiet = true) }, 80)
     }
 
-    fun docEnd() {
-        Candidates.onCursorMove()
-        val ic = ic() ?: return
-        val s = snapshot(ic) ?: return
-        val e = s.offset + s.text.length
-        ic.setSelection(e, e)
-        speechGate.markSkipNext(SystemClock.uptimeMillis())
-        scheduleAfterSelection("已到结尾")
-        main.postDelayed({ readLine(quiet = true) }, 80)
+    /** 选择模式下跳到整篇开头/末尾：保持固定端 anchor 不动，把中间全部文本选中 */
+    private fun extendToDocBoundary(ic: InputConnection, s: Snapshot, toStart: Boolean) {
+        cancelPendingExtend()
+        cancelPendingSpeech()
+        speechGate.reset()
+        val base = s.offset
+        val len = s.text.length
+        val dir = if (toStart) -1 else 1
+        val a = if (anchor in base..(base + len)) anchor else base + s.indexOf(minOf(s.start, s.end))
+        var active = if (activeEnd in base..(base + len)) activeEnd else a
+        if (s.hasSelection) {
+            val realLo = base + s.indexOf(minOf(s.start, s.end))
+            val realHi = base + s.indexOf(maxOf(s.start, s.end))
+            if (minOf(a, active) != realLo || maxOf(a, active) != realHi) {
+                active = s.end.coerceIn(base, base + len)
+            }
+        }
+        val prevLo = minOf(a, active)
+        val prevHi = maxOf(a, active)
+        val newActive = if (toStart) base else base + len
+        val now = SystemClock.uptimeMillis()
+
+        if (newActive == active) {
+            Sound.play("boundary")
+            val n = kotlin.math.abs(active - a)
+            val msg = if (n == 0) {
+                if (toStart) "已到开头" else "已到结尾"
+            } else {
+                (if (toStart) "已选到开头，共" else "已选到末尾，共") + "${n}个字"
+            }
+            Speaker.speak(msg)
+            return
+        }
+        if (newActive == a) {
+            selectGuardUntil = now + 260L
+            ic.setSelection(a, a)
+            activeEnd = a
+            speechGate.markSkipNext(now)
+            val removed = if (prevHi > prevLo) {
+                val rLo = (prevLo - base).coerceIn(0, len)
+                val rHi = (prevHi - base).coerceIn(rLo, len)
+                s.text.substring(rLo, rHi)
+            } else ""
+            val msg = if (removed.isNotEmpty()) GestureSpeechFormat.deselected(formatDeltaText(removed)) else "取消选择"
+            val d = cancelSelectionDelayMs()
+            scheduleAfterSelection(msg, afterSelMs = d, fallbackMs = SelectionOverrideTiming.fallbackMs(d))
+            return
+        }
+
+        selectGuardUntil = now + 260L
+        ic.setSelection(a, newActive)
+        Speaker.hushReader()
+        activeEnd = newActive
+        watchExtendResult(
+            if (toStart) "选到开头" else "选到末尾",
+            Unit.DOC,
+            dir,
+            s.text,
+            base,
+            prevLo,
+            prevHi,
+            allowFallback = true,
+            timeoutMs = 80L,
+        )
     }
 
     // ---------------- 朗读 ----------------
@@ -1369,7 +1501,7 @@ object EditActions {
         val lo = (s.indexOf(minOf(s.start, s.end))).coerceIn(0, s.text.length)
         val hi = (s.indexOf(maxOf(s.start, s.end))).coerceIn(0, s.text.length)
         val t = s.text.substring(lo, hi).trim()
-        if (t.isEmpty()) Speaker.speak("选中的是空白") else Speaker.speak("${t.take(200)}，已选中")
+        if (t.isEmpty()) Speaker.speak("选中的是空白") else Speaker.speak("${t}，已选中")
     }
 
     /** 撤销上一次编辑：走编辑框自己的 undo，不支持就退到“按住删除键”那种 */

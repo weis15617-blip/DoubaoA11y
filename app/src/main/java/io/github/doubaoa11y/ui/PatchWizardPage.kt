@@ -10,6 +10,7 @@ import android.widget.TextView
 import io.github.doubaoa11y.ConfigSpec
 import io.github.doubaoa11y.patch.ApkPatcher
 import io.github.doubaoa11y.patch.DoubaoInstaller
+import io.github.doubaoa11y.patch.PatchLog
 import java.util.WeakHashMap
 
 /**
@@ -114,6 +115,12 @@ object PatchWizardPage {
                 setPrimary(h, "安装修补版豆包输入法") {
                     startInstall(h, prepared)
                 }
+                addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
+                    exportPreparedToFolder(h, prepared)
+                }
+                addSecondary(h, "复制安装修补日志") {
+                    act.toast(PatchLog.copyToClipboard(act))
+                }
                 addSecondary(h, "刷新状态") { refresh(act, announce = true) }
                 addSecondary(h, "放弃并清理缓存的修补包") {
                     ApkPatcher.clearPrepared(act)
@@ -159,6 +166,9 @@ object PatchWizardPage {
                 setPrimary(h, "卸载原版豆包输入法") {
                     DoubaoInstaller.requestUninstallDoubao(act)
                 }
+                addSecondary(h, "导出修补安装包到文件夹（备用）") {
+                    exportPreparedToFolder(h, prepared)
+                }
                 addSecondary(h, "我已卸载，刷新状态") { refresh(act, announce = true) }
                 addSecondary(h, "重新生成修补包") {
                     ApkPatcher.clearPrepared(act)
@@ -201,6 +211,9 @@ object PatchWizardPage {
                         setPrimary(h, "覆盖安装新版豆包输入法") {
                             startInstall(h, preparedHot)
                         }
+                        addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
+                            exportPreparedToFolder(h, preparedHot)
+                        }
                         addSecondary(h, "重新生成覆盖包") {
                             ApkPatcher.clearPrepared(act)
                             confirmAndPatch(h, st, autoInstallAfter = true)
@@ -218,6 +231,7 @@ object PatchWizardPage {
                     }
                     addSecondary(h, "刷新状态") { refresh(act, announce = true) }
                 } else {
+                    if (prepared != null) ApkPatcher.clearPrepared(act)
                     setSummary(
                         h,
                         "配置完成：豆包输入法（${st.versionName}）已嵌入最新版无障碍模块（${ConfigSpec.MODULE_VERSION_NAME}）。\n\n" +
@@ -293,6 +307,9 @@ object PatchWizardPage {
                         .setTitle("修补失败")
                         .setMessage("生成修补包时出错：$detail")
                         .setPositiveButton("确定", null)
+                        .setNeutralButton("复制错误日志") { _, _ ->
+                            h.act.toast(PatchLog.copyToClipboard(h.act))
+                        }
                         .show()
                     refresh(h.act, announce = true)
                 }
@@ -310,8 +327,11 @@ object PatchWizardPage {
         DoubaoInstaller.installPrepared(h.act, prepared) { done, ok, msg ->
             if (h.act.isFinishing) return@installPrepared
             if (!done) {
+                // 系统安装界面已打开：解除 busy，安装完成返回本页时 onResume 可自动刷新状态
+                h.busy = false
+                h.primary.isEnabled = true
+                h.primary.text = "重新打开系统安装界面"
                 setSummary(h, msg, announce = true)
-                h.primary.text = "等待系统安装完成…"
                 return@installPrepared
             }
             h.busy = false
@@ -319,13 +339,55 @@ object PatchWizardPage {
                 setSummary(h, msg, announce = true)
                 refresh(h.act, announce = true)
             } else {
-                AlertDialog.Builder(h.act)
+                val dlg = AlertDialog.Builder(h.act)
                     .setTitle("安装未完成")
                     .setMessage(msg)
                     .setPositiveButton("确定", null)
-                    .show()
+                    .setNeutralButton("复制错误日志") { _, _ ->
+                        h.act.toast(PatchLog.copyToClipboard(h.act))
+                    }
+                if (prepared.splitApks.isEmpty()) {
+                    dlg.setNegativeButton("导出安装包手动安装") { _, _ ->
+                        exportPreparedToFolder(h, prepared)
+                    }
+                }
+                dlg.show()
                 refresh(h.act, announce = true)
             }
+        }
+    }
+
+    private fun exportPreparedToFolder(h: Holder, prepared: ApkPatcher.PreparedOutput) {
+        if (h.busy) return
+        AppStorage.ensurePermission(h.act) {
+            if (h.busy || h.act.isFinishing) return@ensurePermission
+            h.busy = true
+            h.primary.isEnabled = false
+            setSummary(h, "正在导出修补安装包到手机存储，请稍候…", announce = true)
+            Thread {
+                try {
+                    val out = DoubaoInstaller.exportPreparedApk(h.act, prepared)
+                    val shownPath = AppStorage.displayPath(out)
+                    main.post {
+                        h.busy = false
+                        if (h.act.isFinishing) return@post
+                        AlertDialog.Builder(h.act)
+                            .setTitle("修补安装包已导出")
+                            .setMessage("已保存到：$shownPath\n\n如果刚才无法直接跳转安装，可打开手机“文件管理”找到此安装包点击安装。")
+                            .setPositiveButton("知道了", null)
+                            .show()
+                        refresh(h.act, announce = true)
+                    }
+                } catch (t: Throwable) {
+                    PatchLog.e(h.act, "导出修补安装包失败", t)
+                    main.post {
+                        h.busy = false
+                        if (h.act.isFinishing) return@post
+                        h.act.toast("导出失败：${t.message ?: t.javaClass.simpleName}")
+                        refresh(h.act, announce = true)
+                    }
+                }
+            }.start()
         }
     }
 

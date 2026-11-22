@@ -14,6 +14,7 @@ object TypingEcho {
     private var session = 0L
     private var deletion: PendingDelete? = null
     private var suppressDeleteUntil = 0L
+    private var suppressInputUntil = 0L
     data class Snapshot(val text: String, val selectionStart: Int = -1, val selectionEnd: Int = -1)
     private data class Composing(val start: Int, val inserted: String, val confirmedBody: String) {
         fun validIn(body: String): Boolean = body == confirmedBody && start >= 0 &&
@@ -33,6 +34,9 @@ object TypingEcho {
         deletion = null
         main.removeCallbacks(readDeletion)
     }
+    fun suppressInputFor(ms: Long = 300L) {
+        suppressInputUntil = SystemClock.uptimeMillis() + ms
+    }
     fun snapshot(ic: InputConnection): Snapshot? {
         if (!observing() || !InputPrivacy.mayRead()) return null
         return try {
@@ -43,9 +47,10 @@ object TypingEcho {
             if (text.length > 8192) null else Snapshot(text, value.selectionStart, value.selectionEnd)
         } catch (_: Throwable) { null }
     }
-    fun reset() { session++; composing.clear(); deletion = null; suppressDeleteUntil = 0L; main.removeCallbacks(readDeletion) }
+    fun reset() { session++; composing.clear(); deletion = null; suppressDeleteUntil = 0L; suppressInputUntil = 0L; main.removeCallbacks(readDeletion) }
     fun successful(ic: InputConnection, name: String, argument: String, before: Snapshot?) {
         if (!enabled || !InputPrivacy.mayRead()) return
+        if (SystemClock.uptimeMillis() < suppressInputUntil) return
         if (name == "finishComposingText") {
             val value = composing.remove(ic) ?: return
             if (snapshot(ic)?.text?.let { value.validIn(it) } != true) return

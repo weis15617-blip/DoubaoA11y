@@ -149,12 +149,18 @@ object InputHooks {
                 "setComposingText" -> {
                     val value = text?.toString().orEmpty()
                     for (listener in composingListeners) try { listener(value) } catch (t: Throwable) { L.hookError("IC.composing", t) }
-                    if (value.isNotBlank()) EditOptions.markTyped()
+                    if (value.isNotBlank()) {
+                        EditOptions.markTyped()
+                        ClipboardNav.onTyping()
+                    }
                     TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
                 }
                 "commitText" -> {
                     val value = text?.toString().orEmpty()
-                    if (value.isNotBlank()) EditOptions.markTyped()
+                    if (value.isNotBlank()) {
+                        EditOptions.markTyped()
+                        ClipboardNav.onTyping()
+                    }
                     for (listener in commitListeners) try { listener(value, caller()) } catch (t: Throwable) { L.hookError("IC.commit", t) }
                     TypingEcho.successful(ic, name, value, p.getObjectExtra(SNAPSHOT) as? TypingEcho.Snapshot)
                 }

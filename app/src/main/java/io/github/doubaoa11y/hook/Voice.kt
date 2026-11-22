@@ -250,6 +250,10 @@ object Voice {
 
     fun isRecording(): Boolean = recording
 
+    /** 语音录音中，或刚结束录音 900ms 内的保护期（防止语音收尾期间工具栏提示被误抓取朗读） */
+    fun isVoiceBusy(): Boolean =
+        recording || (stopAt > 0L && SystemClock.uptimeMillis() - stopAt < 900L)
+
     private fun inSession(): Boolean = recording || SystemClock.uptimeMillis() < sessionUntil
 
     private fun onComposing(text: String) {

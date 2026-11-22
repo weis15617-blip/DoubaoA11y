@@ -45,10 +45,19 @@ object Haptic {
 
     private fun buzz(v: Vibrator) {
         val strength = Config.i("vibrateStrength")
-        val effect = when (strength) {
-            1 -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
-            3 -> VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE)
-            else -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+        val effect = if (Build.VERSION.SDK_INT >= 29) {
+            when (strength) {
+                1 -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
+                3 -> VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE)
+                else -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+            }
+        } else {
+            val ms = when (strength) {
+                1 -> 15L
+                3 -> 30L
+                else -> 22L
+            }
+            VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)
         }
         // 按“无障碍”类别发震动：系统“触感反馈”关着时，普通触摸类震动会被忽略，无障碍类不受它影响
         if (Build.VERSION.SDK_INT >= 33) {
