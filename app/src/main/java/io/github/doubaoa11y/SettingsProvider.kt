@@ -126,13 +126,32 @@ class SettingsProvider : ContentProvider() {
         val ctx = context ?: return null
         val segments = uri.pathSegments
         // 允许系统安装器通过本应用签发的一次性令牌只读打开修补版豆包 APK（用于 Android 8–13 通用 ACTION_VIEW 安装）
-        if (segments.size == 2 && segments[0] == "patched_apk") {
-            if (mode.contains('w')) throw SecurityException("安装包仅允许只读访问")
-            val f = resolvePatchedApk(segments[1]) ?: throw SecurityException("安装包访问令牌已失效")
+        val apkToken = extractPatchedApkToken(segments)
+        if (apkToken != null) {
+            val callingUid = Binder.getCallingUid()
             val identity = Binder.clearCallingIdentity()
+            val caller = try {
+                ctx.packageManager.getPackagesForUid(callingUid)?.joinToString(",") ?: "uid=$callingUid"
+            } catch (_: Throwable) {
+                "uid=$callingUid"
+            }
             return try {
-                if (!f.isFile) throw java.io.FileNotFoundException("未找到待安装的修补包")
-                android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+                if (mode.contains('w')) {
+                    runCatching { io.github.doubaoa11y.patch.PatchLog.w(ctx, "安装器 openFile 被拒（写模式）：caller=$caller mode=$mode") }
+                    throw SecurityException("安装包仅允许只读访问")
+                }
+                val f = resolvePatchedApk(ctx, apkToken)
+                if (f == null) {
+                    runCatching { io.github.doubaoa11y.patch.PatchLog.w(ctx, "安装器 openFile 令牌失效：caller=$caller uri=$uri") }
+                    throw SecurityException("安装包访问令牌已失效")
+                }
+                if (!f.isFile) {
+                    runCatching { io.github.doubaoa11y.patch.PatchLog.w(ctx, "安装器 openFile 文件不存在：caller=$caller path=${f.absolutePath}") }
+                    throw java.io.FileNotFoundException("未找到待安装的修补包")
+                }
+                val pfd = android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+                runCatching { io.github.doubaoa11y.patch.PatchLog.i(ctx, "安装器已打开修补包：caller=$caller mode=$mode size=${f.length()} B") }
+                pfd
             } finally {
                 Binder.restoreCallingIdentity(identity)
             }
@@ -164,30 +183,61 @@ class SettingsProvider : ContentProvider() {
             Binder.restoreCallingIdentity(identity)
         }
     }
-    override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
-        val segments = uri.pathSegments
-        if (segments.size == 2 && segments[0] == "patched_apk") {
-            val f = resolvePatchedApk(segments[1]) ?: return null
-            if (!f.isFile) return null
-            val cols = projection ?: arrayOf(
-                android.provider.OpenableColumns.DISPLAY_NAME,
-                android.provider.OpenableColumns.SIZE,
-            )
-            val row = arrayOfNulls<Any>(cols.size)
-            for (i in cols.indices) {
-                row[i] = when (cols[i]) {
-                    android.provider.OpenableColumns.DISPLAY_NAME -> "DoubaoA11y_patched.apk"
-                    android.provider.OpenableColumns.SIZE -> f.length()
-                    else -> null
-                }
+    override fun openAssetFile(uri: Uri, mode: String): android.content.res.AssetFileDescriptor? {
+        if (extractPatchedApkToken(uri.pathSegments) != null) {
+            val pfd = openFile(uri, mode) ?: return null
+            val len = try {
+                val stat = pfd.statSize
+                if (stat >= 0L) stat else android.content.res.AssetFileDescriptor.UNKNOWN_LENGTH
+            } catch (_: Throwable) {
+                android.content.res.AssetFileDescriptor.UNKNOWN_LENGTH
             }
-            return android.database.MatrixCursor(cols, 1).apply { addRow(row) }
+            return android.content.res.AssetFileDescriptor(pfd, 0L, len)
+        }
+        return super.openAssetFile(uri, mode)
+    }
+    override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
+        val ctx = context ?: return null
+        val apkToken = extractPatchedApkToken(uri.pathSegments)
+        if (apkToken != null) {
+            val callingUid = Binder.getCallingUid()
+            val identity = Binder.clearCallingIdentity()
+            return try {
+                val caller = try {
+                    ctx.packageManager.getPackagesForUid(callingUid)?.joinToString(",") ?: "uid=$callingUid"
+                } catch (_: Throwable) {
+                    "uid=$callingUid"
+                }
+                val f = resolvePatchedApk(ctx, apkToken)
+                if (f == null || !f.isFile) {
+                    runCatching { io.github.doubaoa11y.patch.PatchLog.w(ctx, "安装器 query 未命中修补包：caller=$caller uri=$uri") }
+                    return null
+                }
+                val cols = projection ?: arrayOf(
+                    android.provider.OpenableColumns.DISPLAY_NAME,
+                    android.provider.OpenableColumns.SIZE,
+                )
+                val row = arrayOfNulls<Any>(cols.size)
+                for (i in cols.indices) {
+                    row[i] = when (cols[i]) {
+                        android.provider.OpenableColumns.DISPLAY_NAME -> PATCHED_APK_DISPLAY_NAME
+                        android.provider.OpenableColumns.SIZE -> f.length()
+                        "mime_type" -> "application/vnd.android.package-archive"
+                        else -> null
+                    }
+                }
+                runCatching { io.github.doubaoa11y.patch.PatchLog.i(ctx, "安装器已查询修补包信息：caller=$caller size=${f.length()} B") }
+                android.database.MatrixCursor(cols, 1).apply { addRow(row) }
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
         }
         return null
     }
     override fun getType(uri: Uri): String? {
-        val segments = uri.pathSegments
-        if (segments.size == 2 && segments[0] == "patched_apk" && resolvePatchedApk(segments[1]) != null) {
+        val ctx = context ?: return null
+        val apkToken = extractPatchedApkToken(uri.pathSegments)
+        if (apkToken != null && resolvePatchedApk(ctx, apkToken) != null) {
             return "application/vnd.android.package-archive"
         }
         return null
@@ -197,12 +247,24 @@ class SettingsProvider : ContentProvider() {
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
     companion object {
         val URI: Uri = Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/config")
+        private const val PATCHED_APK_DISPLAY_NAME = "DoubaoA11y_patched.apk"
+        private const val GRANT_RECORD_NAME = "apk_grant.txt"
         private val TOKEN_RE = Regex("^[a-f0-9]{16,64}$")
         private val apkGrantLock = Any()
         private var activeApkToken: String? = null
         private var activeApkFile: java.io.File? = null
 
-        fun issuePatchedApkUri(apkFile: java.io.File): Uri {
+        private fun extractPatchedApkToken(segments: List<String>?): String? {
+            if (segments == null || segments.size !in 2..3 || segments[0] != "patched_apk") return null
+            if (segments.size == 3 && !segments[2].endsWith(".apk", ignoreCase = true)) return null
+            val token = segments[1]
+            return if (TOKEN_RE.matches(token)) token else null
+        }
+
+        private fun grantRecordFile(ctx: Context): java.io.File =
+            java.io.File(java.io.File(ctx.cacheDir, "patched_doubao"), GRANT_RECORD_NAME)
+
+        fun issuePatchedApkUri(ctx: Context, apkFile: java.io.File): Uri {
             val bytes = ByteArray(16)
             java.security.SecureRandom().nextBytes(bytes)
             val token = bytes.joinToString("") { "%02x".format(it) }
@@ -210,11 +272,39 @@ class SettingsProvider : ContentProvider() {
                 activeApkToken = token
                 activeApkFile = apkFile
             }
-            return Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/patched_apk/$token")
+            // 持久化令牌记录，避免低内存机型在切到系统安装器后本进程被回收导致令牌失效
+            runCatching {
+                val rf = grantRecordFile(ctx)
+                rf.parentFile?.mkdirs()
+                rf.writeText("$token\n${apkFile.canonicalPath}", Charsets.UTF_8)
+            }
+            return Uri.parse("content://${ConfigSpec.SETTINGS_AUTHORITY}/patched_apk/$token/$PATCHED_APK_DISPLAY_NAME")
         }
 
-        private fun resolvePatchedApk(token: String): java.io.File? = synchronized(apkGrantLock) {
-            if (token.isNotEmpty() && token == activeApkToken) activeApkFile else null
+        private fun resolvePatchedApk(ctx: Context, token: String): java.io.File? {
+            if (!TOKEN_RE.matches(token)) return null
+            synchronized(apkGrantLock) {
+                if (token == activeApkToken) {
+                    val f = activeApkFile
+                    if (f != null && f.isFile) return f
+                }
+            }
+            return try {
+                val rf = grantRecordFile(ctx)
+                if (!rf.isFile) return null
+                val lines = rf.readLines(Charsets.UTF_8)
+                if (lines.size < 2 || lines[0].trim() != token) return null
+                val candidate = java.io.File(lines[1].trim()).canonicalFile
+                val allowedDir = java.io.File(ctx.cacheDir, "patched_doubao").canonicalPath
+                if (!candidate.path.startsWith(allowedDir + java.io.File.separator) || !candidate.isFile) return null
+                synchronized(apkGrantLock) {
+                    activeApkToken = token
+                    activeApkFile = candidate
+                }
+                candidate
+            } catch (_: Throwable) {
+                null
+            }
         }
 
         fun xferUri(token: String): Uri =

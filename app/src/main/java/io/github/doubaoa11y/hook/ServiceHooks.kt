@@ -56,9 +56,18 @@ object ServiceHooks {
         Hooker.method(c, "onComputeInsets", arrayOf(android.inputmethodservice.InputMethodService.Insets::class.java),
             SafeHook("fullscreen.insets", after = { p -> FullscreenMode.onComputeInsets(p.args[0]) }))
         Hooker.method(c, "onDestroy", arrayOf(), SafeHook("fullscreen.destroy", before = { _ ->
-            FullscreenMode.shutdown(); TatansBridge.onHidden(); EditOptions.onKeyboardHidden(); Speaker.stop()
+            FullscreenMode.shutdown()
+            ReaderControl.hidden()
+            TatansBridge.onHidden()
+            EditOptions.onKeyboardHidden()
+            Speaker.stop()
         }))
         Hooker.method(c, "onWindowShown", arrayOf(), SafeHook("onWindowShown", after = { _ ->
+            cancelHide("onWindowShown")
+            windowShown = true
+            LogStore.ensureCrashHandler(appContext)
+            A11yState.refreshState("键盘显示")
+            ReaderControl.shown()
             L.i("键盘窗口显示（${A11yState.describe()}）")
             if (A11yState.recording) ViewA11yHooks.dumpTreeLater("键盘显示后")
             // 豆包刚启动时键盘没切换过，收不到切换回调，不知道是九键还是全键：显示时查一次
@@ -71,18 +80,19 @@ object ServiceHooks {
             ClipboardNav.onKeyboardShown()
             TatansBridge.onShown()
             FullscreenMode.onWindowShown()
+            ReaderControl.sync()
             ModuleEntries.toolbar()
-            ReaderControl.shown()
             if (FullscreenMode.wanted) {
                 EditActions.onWindowShown()
                 EditOptions.onKeyboardShown()
             }
             Speaker.prepareTts()
             ViewA11yHooks.service?.window?.window?.decorView?.let { StretchPanel.watch(it) }
-            windowShown = true
             if (A11yState.recording && KeyboardViewHooks.isEmpty()) KeyboardViewHooks.requestFullRedraw("键盘显示时键位表为空")
         }))
         Hooker.method(c, "onWindowHidden", arrayOf(), SafeHook("onWindowHidden", after = { _ ->
+            hideSoon("onWindowHidden")
+            windowShown = false
             FullscreenMode.onWindowHidden()
             ReaderControl.hidden()
             EditOptions.onKeyboardHidden()
@@ -96,8 +106,6 @@ object ServiceHooks {
             VirtualKeys.reset()
             EditPanel.close()
             L.i("键盘窗口隐藏")
-            hideSoon("onWindowHidden")
-            windowShown = false
         }))
     }
 
@@ -177,7 +185,6 @@ object ServiceHooks {
         A11yState.init(ctx)
         ClipboardNav.init(ctx)
         TatansBridge.init(ctx)
-        A11yState.onChange { FullscreenMode.refresh("读屏状态变化") }
         val screen = object : BroadcastReceiver() {
             override fun onReceive(c: Context, i: Intent) {
                 if (i.action == Intent.ACTION_SCREEN_OFF) {

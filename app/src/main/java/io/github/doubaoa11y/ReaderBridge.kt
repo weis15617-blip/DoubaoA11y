@@ -40,12 +40,6 @@ object ReaderBridge {
     private const val TALKMAN_SHOW = "com.nirenr.talkman.ACTION_INPUTMETHOD_SHOW"
     private const val TALKMAN_RECT = "com.nirenr.talkman.EXTRA_RECT_DATA"
 
-    private val CONTROL_PACKAGES = setOf(
-        "com.bjbyhd.voiceback",
-        "com.bjbyhd.screenreader",
-        "com.dianming.phoneapp"
-    )
-
     private val lock = Any()
     private var appCtx: Context? = null
     private var remote: IBinder? = null
@@ -334,31 +328,14 @@ object ReaderBridge {
         return Bundle().apply { putBoolean("applied", ok) }
     }
 
-    fun readerControl(ctx: Context, pkg: String, on: Boolean): Bundle {
-        if (pkg !in CONTROL_PACKAGES) {
-            return Bundle().apply { putBoolean("applied", false) }
+    fun readerControl(ctx: Context, pkg: String, on: Boolean): Bundle = Bundle().apply {
+        try {
+            ReaderControlTransport.send(ctx.applicationContext ?: ctx, pkg, on)
+            putBoolean("applied", true)
+        } catch (t: Throwable) {
+            putBoolean("applied", false)
+            putString("error", "${t.javaClass.simpleName}: ${t.message}")
         }
-        val c = ctx.applicationContext ?: ctx
-        val ok = try {
-            if (pkg == "com.dianming.phoneapp") {
-                val i = Intent("com.dianming.phoneapp.SpeakServiceForApp")
-                    .setPackage(pkg)
-                    .putExtra("TouchExplorationMode", if (on) 1 else 0)
-                    .putExtra("notifyInput", true)
-                c.startService(i) != null
-            } else {
-                c.sendBroadcast(
-                    Intent("com.bjbyhd.action.TOUCH_EXPLORATION")
-                        .setPackage(pkg)
-                        .putExtra("exploration_state", on)
-                        .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
-                )
-                true
-            }
-        } catch (_: Throwable) {
-            false
-        }
-        return Bundle().apply { putBoolean("applied", ok) }
     }
 
     private fun trackTokenLocked(token: IBinder?) {
@@ -490,5 +467,52 @@ object ReaderBridge {
             data.recycle()
             reply.recycle()
         }
+    }
+}
+
+/** 模块代理和输入法本地共用读屏请求协议。 */
+internal object ReaderControlTransport {
+    private const val DIANMING = "com.dianming.phoneapp"
+    private const val DIANMING_ACTION = "$DIANMING.SpeakServiceForApp"
+    val CONTROL_PACKAGES = setOf("com.bjbyhd.voiceback", "com.bjbyhd.screenreader", DIANMING)
+
+    fun send(c: Context, pkg: String, on: Boolean) {
+        require(pkg in CONTROL_PACKAGES) { "不支持的读屏包名" }
+        if (pkg == DIANMING) {
+            startDianming(c, on)
+        } else {
+            c.sendBroadcast(
+                Intent("com.bjbyhd.action.TOUCH_EXPLORATION")
+                    .setPackage(pkg)
+                    .putExtra("exploration_state", on)
+                    .addFlags(Intent.FLAG_RECEIVER_FOREGROUND or Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+            )
+        }
+    }
+
+    private fun startDianming(c: Context, on: Boolean) {
+        val intent = Intent(DIANMING_ACTION).setPackage(DIANMING)
+            .putExtra("TouchExplorationMode", if (on) 1 else 0)
+            .putExtra("notifyInput", true)
+        val errors = mutableListOf<String>()
+        val resolved = try {
+            c.packageManager.resolveService(intent, 0)?.serviceInfo?.let {
+                ComponentName(it.packageName, it.name)
+            }
+        } catch (t: Throwable) {
+            errors.add("解析服务：${t.javaClass.simpleName}: ${t.message}")
+            null
+        }
+        val fallback = ComponentName(DIANMING, DIANMING_ACTION)
+        for (component in listOf(resolved, fallback).distinct()) {
+            val name = component?.className ?: "按 action 启动"
+            try {
+                if (c.startService(Intent(intent).setComponent(component)) != null) return
+                errors.add("$name 返回 null")
+            } catch (t: Throwable) {
+                errors.add("$name：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+        error("点明控制服务启动失败：${errors.joinToString("；")}")
     }
 }

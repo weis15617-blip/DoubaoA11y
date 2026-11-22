@@ -55,7 +55,8 @@ object VirtualKeys {
      * 也要接管——全屏是模块自建的触摸浏览层（见 FullscreenTouch），不再依赖读屏的状态。
      */
     val enabled: Boolean get() =
-        (A11yState.active || A11yState.directTouch || fullscreenExplore) && Config.b("virtualKeys")
+        (A11yState.active || A11yState.directTouch || fullscreenExplore || readerPauseTouch) &&
+            Config.b("virtualKeys")
 
     /** 讯飞式的“摸、抬手”处理：触摸浏览开着时由设置决定，关着（直接触摸）时总是；全屏时总是 */
     private val explorer: Boolean get() = A11yState.directTouch || keepFocus || fullscreenExplore
@@ -65,11 +66,13 @@ object VirtualKeys {
      * 天坦穿透没生效时收到的仍是悬停，照旧按触摸浏览处理，不会摸不到键。
      *
      * 保益/点明这类读屏被模块用广播/服务整块关掉触摸浏览后，系统 isTouchExplorationEnabled
-     * 不一定立刻变 false，所以这里也认 pausedByModule（模块主动暂停过），
+     * 不一定立刻变 false，所以这里也认模块仍持有的暂停请求，
      * 让键盘区域走“摸键读键抬手输入”，保益/点明关了触摸浏览后下半屏照样能朗读、能打字。
      */
     val touchMode: Boolean get() =
-        A11yState.directTouch || (A11yState.active && TatansBridge.requested)
+        A11yState.directTouch || (A11yState.active && TatansBridge.requested) || readerPauseTouch
+
+    private val readerPauseTouch: Boolean get() = A11yState.recording && ReaderControl.requested
 
     /** 模块自己送的触摸，不能再被当成手指拦下来 */
     @Volatile

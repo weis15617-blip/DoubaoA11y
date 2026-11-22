@@ -3,11 +3,14 @@ package io.github.doubaoa11y.patch
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -34,6 +37,17 @@ import java.util.WeakHashMap
 object DoubaoInstaller {
     private const val ACTION_INSTALL_PREFIX = "io.github.doubaoa11y.DOUBAO_INSTALL_RESULT"
     private const val APK_MIME = "application/vnd.android.package-archive"
+    private val KNOWN_SYSTEM_INSTALLERS = listOf(
+        "com.google.android.packageinstaller",
+        "com.android.packageinstaller",
+        "com.miui.packageinstaller",
+        "com.oplus.appdetail",
+        "com.coloros.appdetail",
+        "com.vivo.packageinstaller",
+        "com.samsung.android.packageinstaller",
+        "com.huawei.appmarket",
+        "com.hihonor.appmarket"
+    )
     private val main = Handler(Looper.getMainLooper())
     private val activeReceivers = WeakHashMap<Activity, BroadcastReceiver>()
 
@@ -128,17 +142,30 @@ object DoubaoInstaller {
         if (canUseSingleView) {
             val err = launchActionViewInstall(act, prepared.baseApk)
             if (err == null) {
-                onStatus(false, true, "已打开系统安装界面，请在弹出的界面中确认安装，安装完成后返回本页")
+                onStatus(
+                    false,
+                    true,
+                    "已打开系统安装界面，请在弹出的界面中确认安装，安装完成后返回本页。" +
+                        "如未弹出安装界面，请点击下方“换用系统会话模式安装”或“导出修补安装包到文件夹”手动安装。"
+                )
                 return
             }
             PatchLog.w(act, "ACTION_VIEW 拉起安装界面失败（$err），降级改用 PackageInstaller.Session")
         }
 
-        installViaSession(act, prepared, allowActionViewFallback = prepared.splitApks.isEmpty() && !canUseSingleView, onStatus = onStatus)
+        installViaSession(
+            act,
+            prepared,
+            allowActionViewFallback = !forceSession && prepared.splitApks.isEmpty() && !canUseSingleView,
+            onStatus = onStatus
+        )
     }
 
     /**
-     * 使用标准 Intent.ACTION_VIEW + SettingsProvider 一次性授权 URI 拉起系统安装器（仅单 APK）。
+     * 使用标准 Intent.ACTION_VIEW + SettingsProvider 一次性授权 .apk URI 拉起系统安装器（仅单 APK）。
+     * - 附带 ClipData、FLAG_GRANT_READ_URI_PERMISSION 与 FLAG_ACTIVITY_NEW_TASK（避免小米等 ROM 同栈中转自闭）；
+     * - 优先定向解析到的系统安装器组件，避免被第三方文件管理器劫持或弹出无关选择框；
+     * - 详细记录解析结果与最终启动目标到 PatchLog。
      * 返回 null 表示成功拉起，否则返回错误原因。
      */
     fun launchActionViewInstall(act: Activity, apkFile: File): String? {
@@ -147,51 +174,143 @@ object DoubaoInstaller {
             PatchLog.e(act, msg)
             return msg
         }
-        val uri = SettingsProvider.issuePatchedApkUri(apkFile)
-        val candidates = listOf(
-            Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, APK_MIME)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            },
-            @Suppress("DEPRECATION")
-            Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                data = uri
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
-                putExtra(Intent.EXTRA_RETURN_RESULT, false)
-            }
+        val uri = SettingsProvider.issuePatchedApkUri(act, apkFile)
+
+        fun buildViewIntent(): Intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, APK_MIME)
+            addCategory(Intent.CATEGORY_DEFAULT)
+            clipData = ClipData.newRawUri("apk", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        @Suppress("DEPRECATION")
+        fun buildInstallIntent(): Intent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = uri
+            clipData = ClipData.newRawUri("apk", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            putExtra(Intent.EXTRA_RETURN_RESULT, false)
+        }
+
+        val viewProbe = buildViewIntent()
+        val installProbe = buildInstallIntent()
+        val viewResolvers = queryResolvers(act, viewProbe)
+        val installResolvers = queryResolvers(act, installProbe)
+        val defaultView = resolveDefaultComponent(act, viewProbe)
+        val defaultInstall = resolveDefaultComponent(act, installProbe)
+
+        PatchLog.i(
+            act,
+            "安装器解析：uri=$uri viewDefault=$defaultView viewCandidates=${formatResolvers(viewResolvers)} " +
+                "installDefault=$defaultInstall installCandidates=${formatResolvers(installResolvers)}"
         )
+
+        grantUriToPackages(act, uri, viewResolvers + installResolvers)
+
+        val attempts = mutableListOf<Pair<String, Intent>>()
+        val sysView = pickSystemInstaller(viewResolvers)
+        if (sysView != null) {
+            val ai = sysView.activityInfo
+            attempts.add(
+                "VIEW(${ai.packageName}/${ai.name})" to buildViewIntent().setClassName(ai.packageName, ai.name)
+            )
+        }
+        attempts.add("VIEW(generic)" to buildViewIntent())
+
+        val sysInstall = pickSystemInstaller(installResolvers)
+        if (sysInstall != null) {
+            val ai = sysInstall.activityInfo
+            attempts.add(
+                "INSTALL_PACKAGE(${ai.packageName}/${ai.name})" to buildInstallIntent().setClassName(ai.packageName, ai.name)
+            )
+        }
+        attempts.add("INSTALL_PACKAGE(generic)" to buildInstallIntent())
+
         var lastError: String? = null
-        for (intent in candidates) {
+        for ((label, intent) in attempts) {
             try {
-                grantUriToResolvers(act, intent, uri)
                 act.startActivity(intent)
-                PatchLog.i(act, "已通过 ${intent.action} 拉起系统安装界面（size=${apkFile.length()} B）")
+                PatchLog.i(act, "已通过 $label 拉起系统安装界面（size=${apkFile.length()} B）")
                 return null
             } catch (t: Throwable) {
-                lastError = "${intent.action}: ${t.javaClass.simpleName}: ${t.message}"
-                PatchLog.e(act, "通过 ${intent.action} 拉起安装界面失败", t)
+                lastError = "$label: ${t.javaClass.simpleName}: ${t.message}"
+                PatchLog.e(act, "通过 $label 拉起安装界面失败", t)
             }
         }
         return lastError ?: "无法打开系统安装界面"
     }
 
-    private fun grantUriToResolvers(act: Activity, intent: Intent, uri: Uri) {
-        try {
+    private fun queryResolvers(act: Activity, intent: Intent): List<ResolveInfo> {
+        return try {
             val flags = PackageManager.MATCH_DEFAULT_ONLY
-            val infos = if (Build.VERSION.SDK_INT >= 33) {
+            if (Build.VERSION.SDK_INT >= 33) {
                 act.packageManager.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
             } else {
                 @Suppress("DEPRECATION")
                 act.packageManager.queryIntentActivities(intent, flags)
             }
-            for (ri in infos) {
-                val pkg = ri.activityInfo?.packageName ?: continue
-                runCatching {
-                    act.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-            }
         } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    private fun resolveDefaultComponent(act: Activity, intent: Intent): String {
+        return try {
+            val flags = PackageManager.MATCH_DEFAULT_ONLY
+            val ri = if (Build.VERSION.SDK_INT >= 33) {
+                act.packageManager.resolveActivity(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                act.packageManager.resolveActivity(intent, flags)
+            }
+            val ai = ri?.activityInfo ?: return "none"
+            "${ai.packageName}/${ai.name}"
+        } catch (_: Throwable) {
+            "err"
+        }
+    }
+
+    private fun formatResolvers(infos: List<ResolveInfo>): String {
+        if (infos.isEmpty()) return "[]"
+        return infos.joinToString(prefix = "[", postfix = "]") { ri ->
+            val ai = ri.activityInfo
+            val sys = ((ai?.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
+            "${ai?.packageName}/${ai?.name}(sys=$sys)"
+        }
+    }
+
+    private fun pickSystemInstaller(infos: List<ResolveInfo>): ResolveInfo? {
+        val valid = infos.filter { ri ->
+            val ai = ri.activityInfo ?: return@filter false
+            val pkg = ai.packageName ?: return@filter false
+            pkg != "android" && ai.exported
+        }
+        // 1. 优先系统应用且包名命中已知系统安装器或包含 packageinstaller
+        valid.firstOrNull { ri ->
+            val ai = ri.activityInfo
+            val isSys = ((ai.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
+            val pkg = ai.packageName
+            isSys && (pkg in KNOWN_SYSTEM_INSTALLERS || pkg.contains("packageinstaller", ignoreCase = true))
+        }?.let { return it }
+        // 2. 其次系统应用且包名包含 installer
+        valid.firstOrNull { ri ->
+            val ai = ri.activityInfo
+            val isSys = ((ai.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM) != 0
+            isSys && ai.packageName.contains("installer", ignoreCase = true)
+        }?.let { return it }
+        return null
+    }
+
+    private fun grantUriToPackages(act: Activity, uri: Uri, infos: List<ResolveInfo>) {
+        val pkgs = LinkedHashSet<String>()
+        for (ri in infos) {
+            ri.activityInfo?.packageName?.takeIf { it.isNotEmpty() && it != "android" }?.let { pkgs.add(it) }
+        }
+        pkgs.addAll(KNOWN_SYSTEM_INSTALLERS)
+        for (pkg in pkgs) {
+            runCatching {
+                act.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         }
     }
 

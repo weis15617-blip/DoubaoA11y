@@ -13,6 +13,7 @@ class HookEntry : IXposedHookLoadPackage {
         try {
             L.i("加载到进程 ${lpparam.processName}，开始安装 hook")
             val cl = lpparam.classLoader
+            MetasecCompat.install(lpparam)
             NativeBackup.installEarlyRestoreHook(lpparam.appInfo?.dataDir)
             KeyboardViewHooks.install(cl)
             JniHooks.install(cl)

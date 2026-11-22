@@ -113,7 +113,12 @@ object PatchWizardPage {
                     announce
                 )
                 setPrimary(h, "安装修补版豆包输入法") {
-                    startInstall(h, prepared)
+                    startInstall(h, prepared, forceSession = false)
+                }
+                if (prepared.splitApks.isEmpty()) {
+                    addSecondary(h, "换用系统会话模式安装（备用）") {
+                        startInstall(h, prepared, forceSession = true)
+                    }
                 }
                 addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
                     exportPreparedToFolder(h, prepared)
@@ -209,10 +214,18 @@ object PatchWizardPage {
                             announce
                         )
                         setPrimary(h, "覆盖安装新版豆包输入法") {
-                            startInstall(h, preparedHot)
+                            startInstall(h, preparedHot, forceSession = false)
+                        }
+                        if (preparedHot.splitApks.isEmpty()) {
+                            addSecondary(h, "换用系统会话模式安装（备用）") {
+                                startInstall(h, preparedHot, forceSession = true)
+                            }
                         }
                         addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
                             exportPreparedToFolder(h, preparedHot)
+                        }
+                        addSecondary(h, "复制安装修补日志") {
+                            act.toast(PatchLog.copyToClipboard(act))
                         }
                         addSecondary(h, "重新生成覆盖包") {
                             ApkPatcher.clearPrepared(act)
@@ -317,20 +330,36 @@ object PatchWizardPage {
         }.start()
     }
 
-    private fun startInstall(h: Holder, prepared: ApkPatcher.PreparedOutput) {
+    private fun startInstall(h: Holder, prepared: ApkPatcher.PreparedOutput, forceSession: Boolean = false) {
         if (h.busy) return
         h.busy = true
         h.primary.isEnabled = false
         h.primary.text = "正在准备系统安装器…"
         setSummary(h, "正在提交安装包给系统安装器，请稍候…", announce = true)
 
-        DoubaoInstaller.installPrepared(h.act, prepared) { done, ok, msg ->
+        DoubaoInstaller.installPrepared(h.act, prepared, forceSession = forceSession) { done, ok, msg ->
             if (h.act.isFinishing) return@installPrepared
             if (!done) {
                 // 系统安装界面已打开：解除 busy，安装完成返回本页时 onResume 可自动刷新状态
                 h.busy = false
                 h.primary.isEnabled = true
-                h.primary.text = "重新打开系统安装界面"
+                h.primary.text = if (forceSession) "重新用会话模式安装" else "重新打开系统安装界面"
+                if (h.secondaryBox.childCount == 0) {
+                    if (!forceSession && prepared.splitApks.isEmpty()) {
+                        addSecondary(h, "换用系统会话模式安装（备用）") {
+                            startInstall(h, prepared, forceSession = true)
+                        }
+                    }
+                    if (prepared.splitApks.isEmpty()) {
+                        addSecondary(h, "导出修补安装包到文件夹（安装失败时备用）") {
+                            exportPreparedToFolder(h, prepared)
+                        }
+                    }
+                    addSecondary(h, "复制安装修补日志") {
+                        h.act.toast(PatchLog.copyToClipboard(h.act))
+                    }
+                    addSecondary(h, "刷新状态") { refresh(h.act, announce = true) }
+                }
                 setSummary(h, msg, announce = true)
                 return@installPrepared
             }
