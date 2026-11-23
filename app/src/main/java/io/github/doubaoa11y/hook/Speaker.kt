@@ -30,22 +30,58 @@ object Speaker {
     fun readerWillSpeak(): Boolean = Config.b("speakByReader") && !TatansBridge.readerEventsSuppressed
     fun hushReader() { /* 不压制用户读屏，宿主应用的选区提示由读屏自身决定。 */ }
     fun echo(text: String) = speak(text)
+    /**
+     * 朗读队列。
+     *
+     * 实测：震动已经异步化（立刻返回），但 speak 还同步占主线程 280~390us，
+     * 表现就是「震动先到、TTS 慢半拍」。
+     *
+     * 这里把真正的发送动作丢到单线程队列：单线程保证「先摸的键先读完」的顺序，
+     * 队列容量 8 + 丢弃最旧：快速滑动时不会堆积成一长串迟到的朗读
+     * （那比漏读更难受），优先保证最近摸到的键。
+     */
+    private val speakQueue = java.util.concurrent.ThreadPoolExecutor(
+        1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.ArrayBlockingQueue<Runnable>(8),
+        java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy(),
+    )
+
     fun speak(text: String) {
         if (!A11yState.recording || text.isBlank() || SystemClock.uptimeMillis() < muteUntil) return
-        if (!Config.b("speakByReader")) {
-            ttsRequested = true
-            val ok = try {
-                val spoken = if (Config.b("ttsPunctuationNames")) Names.punctuationText(text) else text
-                val b = Bundle().apply { putString("text", spoken) }
-                ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
-            } catch (t: Throwable) { L.hookError("Speaker.tts", t); false }
-            if (ok) return
+        // 判断在当前线程做（要读瞬时状态），真正的发送丢到队列
+        val byReader = Config.b("speakByReader")
+        val usePunct = !byReader && Config.b("ttsPunctuationNames")
+        speakQueue.execute {
+            try {
+                if (!byReader) {
+                    ttsRequested = true
+                    val spoken = if (usePunct) Names.punctuationText(text) else text
+                    val b = Bundle().apply { putString("text", spoken) }
+                    val ok = try {
+                        ctx?.contentResolver?.call(io.github.doubaoa11y.SettingsProvider.URI, "speak", null, b)?.getBoolean("accepted") == true
+                    } catch (t: Throwable) {
+                        L.hookError("Speaker.tts", t)
+                        false
+                    }
+                    if (ok) return@execute
+                }
+                readerSay(text)
+            } catch (t: Throwable) {
+                L.hookError("Speaker.speak", t)
+            }
         }
-        readerSay(text)
     }
+
     private const val PKG_TALKMAN = "com.nirenr.talkman"
 
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     private fun readerSay(text: String) {
+        // sendAccessibilityEvent 必须在主线程调用；从朗读队列过来时投递回去
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            mainHandler.post { readerSay(text) }
+            return
+        }
         val m = am ?: return
         try {
             if (!m.isEnabled) return
